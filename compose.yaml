@@ -1,0 +1,32 @@
+services:
+  api:
+    build: .
+    container_name: gemma4-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Đặt trong file .env (đã gitignore): HF_TOKEN=hf_xxx
+      HF_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
+      MODEL_ID: "google/gemma-4-e2b-it"
+      MAX_NEW_TOKENS: "128"
+    volumes:
+      # cache trọng số HF để lần chạy sau không tải lại
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import requests,sys; sys.exit(0 if requests.get('http://localhost:8000/health').json().get('status')=='ok' else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    # GPU NVIDIA (cần nvidia-container-toolkit trên host).
+    # Nếu chạy trên máy KHÔNG có GPU, xoá/nhận xét khối deploy này.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
