@@ -10,8 +10,10 @@ services:
       HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
     command:
       - --model=google/gemma-4-e2b-it
-      - --max-model-len=2048         # query ngắn -> không cần dài, tiết kiệm VRAM
-      - --gpu-memory-utilization=0.5 # chừa VRAM cho Ollama đang chạy chung GPU
+      - --max-model-len=1024          # query ngắn -> giảm KV cache cần thiết
+      - --gpu-memory-utilization=0.85 # cần đủ budget cho weights + KV cache
+      - --enforce-eager               # tắt CUDA graph -> tiết kiệm VRAM
+      - --max-num-seqs=64
       - --port=8000
     volumes:
       - hf-cache:/root/.cache/huggingface
