@@ -13,7 +13,7 @@ build:
 	docker compose build
 
 pull:
-	docker compose run --rm --no-deps --entrypoint huggingface-cli vllm \
+	docker compose run --rm --no-deps --entrypoint hf vllm \
 		download google/gemma-4-e2b-it
 
 up:
