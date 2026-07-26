@@ -1,3 +1,4 @@
 .env
+hf-cache/
 __pycache__/
 *.pyc

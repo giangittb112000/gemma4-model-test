@@ -94,14 +94,28 @@ cp .env.example .env
 ### Các lệnh
 
 ```bash
-make up      # chạy vllm + api; lần đầu vLLM tải trọng số (~5GB)
+make pull    # (khuyến nghị) tải model về ./hf-cache 1 lần
+make up      # chạy vllm + api
+make wait    # chờ tới khi model load xong (/health = ok)
 make test    # gửi các query mẫu (curl) tới api đang chạy
 make logs    # xem log (cả vllm + api)
 make down    # dừng
-make clean   # dừng + xoá cache model
 ```
 
-Lần đầu `make up` phải đợi vLLM tải & nạp model (xem `make logs`). Khi `curl localhost:8000/health` trả `{"status":"ok",...}` thì chạy `make test`.
+Quy trình gợi ý lần đầu: `make pull` → `make up` → `make wait` → `make test`.
+
+### Tải model 1 lần, các lần sau load nhanh
+
+Model được cache ra **folder host `./hf-cache`** (bind mount), tải 1 lần là xong:
+
+- `make pull` tải trọng số về `./hf-cache` (dùng `huggingface-cli` trong image vLLM). Có thể bỏ qua vì `make up` lần đầu cũng tự tải.
+- Sau khi `./hf-cache` đã có dữ liệu, đặt trong `.env`:
+  ```
+  HF_HUB_OFFLINE=1
+  ```
+  → vLLM **đọc thẳng từ cache, bỏ bước gọi mạng Hugging Face mỗi lần khởi động** (đây là nguyên nhân chính khiến start lâu), nên các lần `make up` sau sẽ nhanh hơn nhiều.
+- Lưu ý: mỗi lần start vẫn có bước **nạp trọng số lên GPU** (không tránh được), nhưng với E2B chỉ vài chục giây.
+- `make clean`/`down` **không xoá** `./hf-cache`. Muốn xoá cache: `rm -rf ./hf-cache`.
 
 Gọi trực tiếp:
 
