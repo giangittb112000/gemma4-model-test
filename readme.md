@@ -1,151 +1,67 @@
-# Vietnamese E-commerce Query Parser (Gemma 4)
+# Query Parser Test — vLLM trực tiếp + JSON schema
 
-Model chuyên phân tích truy vấn tìm kiếm ecommerce tiếng Việt, trả về JSON có cấu trúc cố định.
+Chỉ chạy **1 service**: `vllm/vllm-openai` với model `google/gemma-4-e2b-it`.  
+Test gọi thẳng API OpenAI-compatible của vLLM (`/v1/chat/completions`) kèm `response_format: json_schema`. Không có service API trung gian.
 
-## Mục tiêu
-
-- Xây dựng một model chuyên phân tích truy vấn tìm kiếm ecommerce tiếng Việt.
-- Model phải sửa lỗi chính tả, từ viết tắt, từ không dấu và từ bị viết dính.
-- Đầu ra phải phân tách rõ `category`, `product`, `brand`, `model` và `attributes`.
-- Model luôn trả về JSON theo một schema cố định, không giải thích thêm.
-- Không được tự bịa category, sản phẩm hoặc thuộc tính khi query không đủ thông tin (dùng `null`).
-
-Ví dụ:
-
-```
-search "dt ip 256"  ->  category "điện thoại", product "iphone", spec "256gb"
-```
-
-## Chọn model & tối ưu tốc độ
-
-Ưu tiên **tốc độ** nên chọn model nhỏ nhất họ Gemma 4:
-
-- **Base model: `google/gemma-4-E2B-it` (~2.3B)** — bản nhỏ nhất, đủ mạnh cho task hẹp (trích xuất entity từ query ngắn). QLoRA 4-bit chỉ cần ~3-6 GB VRAM.
-- Nếu sau khi eval thấy `category`/`attribute F1` chưa đạt, mới cân nhắc nâng lên `E4B` (~4.3B, <10 GB VRAM) — vẫn rất nhanh.
-
-Tối ưu tốc độ khi inference:
-
-- **Quantize GGUF `Q4_K_M`** (cân bằng) hoặc `Q4_0` (nhanh hơn); E2B nhỏ nên `Q5_K_M`/`Q6_K` vẫn nhẹ nếu cần chất lượng.
-- **Giới hạn `max_new_tokens` ~64-128** vì JSON đầu ra ngắn.
-- **System prompt gọn, cố định** để prefill nhanh.
-- **Constrained decoding (JSON grammar)**: vừa đảm bảo JSON valid 100%, vừa tăng tốc do thu hẹp không gian token. Ollama hỗ trợ qua `format` (JSON schema).
-
-> Lưu ý: Gemma 4 dùng role `model` (không phải `assistant`). Prompt lúc train và inference phải giống hệt nhau.
-
-## Output schema
-
-```json
-{
-  "category": "điện thoại",
-  "product": "iphone",
-  "brand": "apple",
-  "model": null,
-  "attributes": { "storage": "256gb" }
-}
-```
-
-Trường thiếu thông tin để `null` (hoặc `{}` cho `attributes`). Không bịa giá trị.
-
-## Chiến lược dữ liệu (TripleLearn)
-
-Dùng 3 dataset bổ trợ nhau thay vì 1 tập hoàn hảo:
-
-1. **Golden data** (~2K-16K, gán nhãn tay, lấy mẫu phân tầng theo pattern entity) — bootstrap + đo lường thật.
-2. **Noisy data** (tự sinh từ search logs + click logs, match ngược với catalog/taxonomy) — bắt biến thể thật (`dt ip 256`, `ss s24`...).
-3. **Synthetic data** (sinh từ catalog + alias) — phủ 100% category/brand/product.
-
-Train lặp: bắt đầu từ Golden → dự đoán trên Noisy, chỉ giữ mẫu prediction khớp nhãn log (consensus lọc nhiễu) → thêm vào tập train → lặp lại. Refresh model khi có sản phẩm mới chỉ cần update Synthetic.
-
-Augmentation tiếng Việt (sinh 3-5 biến thể/query): bỏ dấu (`điện thoại`→`dien thoai`), viết tắt/alias (`dt`→điện thoại, `ip`→iphone), viết dính (`iphone256gb`), typo telex (`iphon`, `samsng`).
-
-## Fine-tune (QLoRA)
-
-QLoRA 4-bit với Unsloth (nhanh ~2x, ít VRAM ~70%):
-
-- `r=16`, `lora_alpha=32`, `lora_dropout=0.05`
-- `target_modules=[q,k,v,o,gate,up,down]_proj`
-- `lr=2e-4`, cosine scheduler, `warmup_ratio=0.05`, `epochs=3`, `optim="adamw_8bit"`, effective batch = 8
-
-Đánh giá: JSON valid rate, category accuracy, attribute F1, latency.
-
-Deploy: merge LoRA → `save_pretrained_gguf(q4_k_m)` → `ollama create` → inference bằng Ollama.
-
-## Chạy thử (vLLM + JSON schema + Docker + Make)
-
-Serving bằng **vLLM** (nhanh, continuous batching) + bật **JSON schema** (guided decoding → output JSON valid 100%). Kiến trúc 2 service:
-
-- `vllm` — chạy `google/gemma-4-e2b-it`, expose OpenAI-compatible API + ép JSON schema.
-- `api` — wrapper FastAPI mỏng (không chạy model): dựng prompt, gọi vLLM, trả `{raw, parsed}`. Đây là interface `/parse` cho client.
-
-Token Hugging Face đặt trong file `.env` (đã `.gitignore`, KHÔNG commit):
+## Chuẩn bị
 
 ```bash
 cp .env.example .env
-# rồi sửa .env: HF_TOKEN=hf_xxx
+# sửa: HF_TOKEN=hf_xxx
 ```
 
-Đây là model gated nên token phải có quyền truy cập repo.
+Tắt tạm Ollama (hoặc service đang chiếm GPU) trước khi chạy.
 
-### Yêu cầu server GPU NVIDIA
-
-- NVIDIA driver + nvidia-container-toolkit (server đã có sẵn runtime `nvidia`).
-- `compose.yaml` dùng `runtime: nvidia` cho service `vllm`.
-
-### Các lệnh
+## Chạy trên server
 
 ```bash
-make pull    # (khuyến nghị) tải model về ./hf-cache 1 lần
-make up      # chạy vllm + api
-make wait    # chờ tới khi model load xong (/health = ok)
-make test    # gửi các query mẫu (curl) tới api đang chạy
-make logs    # xem log (cả vllm + api)
-make down    # dừng
+make up       # start vLLM :8000
+make wait     # chờ model load xong
+make test     # gọi thẳng /v1/chat/completions + JSON schema
+make logs
+make down
 ```
 
-Quy trình gợi ý lần đầu: `make pull` → `make up` → `make wait` → `make test`.
-
-### Tải model 1 lần, các lần sau load nhanh
-
-Model được cache ra **folder host `./hf-cache`** (bind mount), tải 1 lần là xong:
-
-- `make pull` tải trọng số về `./hf-cache` (dùng `huggingface-cli` trong image vLLM). Có thể bỏ qua vì `make up` lần đầu cũng tự tải.
-- Sau khi `./hf-cache` đã có dữ liệu, đặt trong `.env`:
-  ```
-  HF_HUB_OFFLINE=1
-  ```
-  → vLLM **đọc thẳng từ cache, bỏ bước gọi mạng Hugging Face mỗi lần khởi động** (đây là nguyên nhân chính khiến start lâu), nên các lần `make up` sau sẽ nhanh hơn nhiều.
-- Lưu ý: mỗi lần start vẫn có bước **nạp trọng số lên GPU** (không tránh được), nhưng với E2B chỉ vài chục giây.
-- `make clean`/`down` **không xoá** `./hf-cache`. Muốn xoá cache: `rm -rf ./hf-cache`.
-
-Gọi trực tiếp:
+## Gọi tay (curl)
 
 ```bash
-curl -s localhost:8000/parse -H 'content-type: application/json' \
-  -d '{"query":"dt ip 256"}'
+curl -s localhost:8000/health
+
+curl -s localhost:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "google/gemma-4-e2b-it",
+    "temperature": 0,
+    "max_tokens": 128,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Phân tích query ecommerce tiếng Việt, trả JSON schema cố định (category, product, brand, model, attributes). Thiếu thì null. query: \"dt ip 256\""
+      }
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "query_parse",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "category": {"type": ["string", "null"]},
+            "product": {"type": ["string", "null"]},
+            "brand": {"type": ["string", "null"]},
+            "model": {"type": ["string", "null"]},
+            "attributes": {"type": "object"}
+          },
+          "required": ["category", "product", "brand", "model", "attributes"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }'
 ```
 
-Endpoint:
-- `GET /health` — trạng thái (proxy tới `vllm/health`).
-- `POST /parse` — body `{"query": "..."}` → `{"raw": "...", "parsed": {category, product, brand, model, attributes}}`.
+## Ghi chú
 
-### Ghi chú cấu hình vLLM (trong `compose.yaml`)
-
-- `--gpu-memory-utilization=0.5`: chừa VRAM vì đang chạy chung GPU với Ollama. Nếu GPU trống, tăng lên `0.9` để nhanh hơn; nếu OOM, giảm xuống.
-- `--max-model-len=2048`: query ngắn nên không cần dài, tiết kiệm VRAM.
-- `MAX_TOKENS=128` (service `api`): giảm còn `48-64` nếu muốn nhanh hơn.
-- JSON schema định nghĩa trong `app/main.py` (`OUTPUT_SCHEMA`).
-
-Cấu trúc:
-
-```
-.
-├── app/
-│   ├── main.py            # FastAPI wrapper: prompt + gọi vLLM (JSON schema)
-│   ├── test_api.py        # smoke test gọi API, validate JSON
-│   └── requirements.txt   # gọn: fastapi/uvicorn/requests (không torch)
-├── Dockerfile             # image api mỏng (python slim)
-├── compose.yaml           # service vllm + api, đọc HF_TOKEN từ .env
-├── Makefile
-├── .env.example           # mẫu, copy thành .env
-└── readme.md
-```
+- Model cache tại `./hf-cache`. Sau lần tải đầu, đặt `HF_HUB_OFFLINE=1` trong `.env`.
+- JSON schema do vLLM ép lúc sinh token — không có sẵn trong model.
+- Script test: `test_vllm.py` (được `make test` gọi).

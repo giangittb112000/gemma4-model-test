@@ -3,42 +3,31 @@ services:
     image: vllm/vllm-openai:latest
     container_name: gemma4-vllm
     runtime: nvidia
-    ipc: host                      # vLLM cần shared memory lớn
+    ipc: host
+    ports:
+      - "8000:8000"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
-      # Trỏ cache HF về đúng thư mục mount (cả 2 biến, theo docs vLLM).
       HF_HOME: /root/.cache/huggingface
       HF_HUB_CACHE: /root/.cache/huggingface
-      # Sau lần tải đầu, đặt HF_HUB_OFFLINE=1 trong .env -> bỏ gọi mạng, load nhanh.
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
     command:
       - --model=google/gemma-4-e2b-it
-      - --max-model-len=1024          # query ngắn -> giảm KV cache cần thiết
-      - --gpu-memory-utilization=0.85 # cần đủ budget cho weights + KV cache
-      - --enforce-eager               # tắt CUDA graph -> tiết kiệm VRAM
-      - --max-num-seqs=64
+      - --max-model-len=1024
+      - --gpu-memory-utilization=0.85
+      - --enforce-eager
       - --port=8000
     volumes:
-      # Bind mount ra folder host -> tải 1 lần, thấy được file, không bị `make clean` xoá.
       - ${HF_CACHE_DIR:-./hf-cache}:/root/.cache/huggingface
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\"",
+        ]
       interval: 10s
       timeout: 5s
       retries: 120
       start_period: 60s
-
-  api:
-    build: .
-    container_name: gemma4-api
-    ports:
-      - "8000:8000"
-    depends_on:
-      vllm:
-        condition: service_healthy
-    environment:
-      VLLM_URL: "http://vllm:8000"
-      MODEL_ID: "google/gemma-4-e2b-it"
-      MAX_TOKENS: "128"

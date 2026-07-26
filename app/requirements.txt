@@ -1,4 +1,0 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-requests==2.32.3
-# Không cần torch/transformers nữa: vLLM (service riêng) lo phần chạy model.
