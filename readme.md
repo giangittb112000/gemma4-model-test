@@ -15,11 +15,20 @@ Tắt tạm Ollama (hoặc service đang chiếm GPU) trước khi chạy.
 ## Chạy trên server
 
 ```bash
-make up       # start vLLM :8000
-make wait     # chờ model load xong
-make test     # gọi thẳng /v1/chat/completions + JSON schema
+make up                 # start vLLM :8000
+make wait               # chờ model load xong
+make test               # bộ query mặc định
+make test Q="dt ip 256" # test 1 query tùy chọn
 make logs
 make down
+```
+
+Hoặc gọi script trực tiếp:
+
+```bash
+python3 test_vllm.py
+python3 test_vllm.py "dt ip 256"
+python3 test_vllm.py "ss s24" "tai nghe bluetooth"
 ```
 
 ## Gọi tay (curl)
