@@ -70,9 +70,12 @@ QLoRA 4-bit với Unsloth (nhanh ~2x, ít VRAM ~70%):
 
 Deploy: merge LoRA → `save_pretrained_gguf(q4_k_m)` → `ollama create` → inference bằng Ollama.
 
-## Chạy thử (API + Docker + Make)
+## Chạy thử (vLLM + JSON schema + Docker + Make)
 
-Một API FastAPI nhỏ load thẳng `google/gemma-4-e2b-it` từ Hugging Face (base model + prompt, chưa fine-tune) để kiểm tra pipeline inference đầu-cuối.
+Serving bằng **vLLM** (nhanh, continuous batching) + bật **JSON schema** (guided decoding → output JSON valid 100%). Kiến trúc 2 service:
+
+- `vllm` — chạy `google/gemma-4-e2b-it`, expose OpenAI-compatible API + ép JSON schema.
+- `api` — wrapper FastAPI mỏng (không chạy model): dựng prompt, gọi vLLM, trả `{raw, parsed}`. Đây là interface `/parse` cho client.
 
 Token Hugging Face đặt trong file `.env` (đã `.gitignore`, KHÔNG commit):
 
@@ -83,17 +86,22 @@ cp .env.example .env
 
 Đây là model gated nên token phải có quyền truy cập repo.
 
-Các lệnh:
+### Yêu cầu server GPU NVIDIA
+
+- NVIDIA driver + nvidia-container-toolkit (server đã có sẵn runtime `nvidia`).
+- `compose.yaml` dùng `runtime: nvidia` cho service `vllm`.
+
+### Các lệnh
 
 ```bash
-make up      # chạy API nền, lần đầu tải trọng số (~5GB)
-make test    # gửi các query mẫu (curl) tới API đang chạy
-make logs    # xem log
+make up      # chạy vllm + api; lần đầu vLLM tải trọng số (~5GB)
+make test    # gửi các query mẫu (curl) tới api đang chạy
+make logs    # xem log (cả vllm + api)
 make down    # dừng
 make clean   # dừng + xoá cache model
 ```
 
-`make test` giả định API đã chạy sẵn (`make up` và `/health` = `ok`), chỉ lo việc gửi curl các query mẫu.
+Lần đầu `make up` phải đợi vLLM tải & nạp model (xem `make logs`). Khi `curl localhost:8000/health` trả `{"status":"ok",...}` thì chạy `make test`.
 
 Gọi trực tiếp:
 
@@ -103,43 +111,26 @@ curl -s localhost:8000/parse -H 'content-type: application/json' \
 ```
 
 Endpoint:
-- `GET /health` — trạng thái model (`loading`/`ok`) và `device` (GPU/CPU đang dùng).
+- `GET /health` — trạng thái (proxy tới `vllm/health`).
 - `POST /parse` — body `{"query": "..."}` → `{"raw": "...", "parsed": {category, product, brand, model, attributes}}`.
 
-### Chạy trên server GPU NVIDIA (khuyến nghị)
+### Ghi chú cấu hình vLLM (trong `compose.yaml`)
 
-Mặc định cấu hình đã bật GPU. Yêu cầu trên host:
-
-- NVIDIA driver.
-- [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-
-Chạy:
-
-```bash
-docker compose up --build -d
-make test        # hoặc: curl localhost:8000/health  -> xem "device": "cuda:..."
-```
-
-Base image `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` đã có sẵn torch + CUDA 12.4 + cuDNN 9 (khớp phiên bản, build nhanh, ổn định). Code tự chọn dtype: `bfloat16` cho GPU Ampere+ (A100/RTX 30/40/L4), `float16` cho GPU cũ (T4). Latency kỳ vọng ~0.2–1s/query (thay vì ~80s trên CPU).
-
-`compose.yaml` dùng `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` — cách hầu hết server đã cấu hình sẵn (giống các dự án GPU khác của bạn), không cần setup thêm.
-
-> Nếu gặp lỗi `open /run/nvidia-persistenced/socket: no such file or directory`: đó là do dùng khối `deploy.devices` (đi qua CDI). Bản compose này đã tránh bằng `runtime: nvidia`.
-
-### Chạy trên máy không có GPU (ví dụ Mac, chỉ để thử)
-
-Xoá (hoặc comment) khối `deploy` trong `compose.yaml` để không yêu cầu GPU; code sẽ tự chạy CPU (`float32`) — nhưng chậm (~vài chục giây/query).
+- `--gpu-memory-utilization=0.5`: chừa VRAM vì đang chạy chung GPU với Ollama. Nếu GPU trống, tăng lên `0.9` để nhanh hơn; nếu OOM, giảm xuống.
+- `--max-model-len=2048`: query ngắn nên không cần dài, tiết kiệm VRAM.
+- `MAX_TOKENS=128` (service `api`): giảm còn `48-64` nếu muốn nhanh hơn.
+- JSON schema định nghĩa trong `app/main.py` (`OUTPUT_SCHEMA`).
 
 Cấu trúc:
 
 ```
 .
 ├── app/
-│   ├── main.py            # FastAPI: load model HF, /parse, /health
+│   ├── main.py            # FastAPI wrapper: prompt + gọi vLLM (JSON schema)
 │   ├── test_api.py        # smoke test gọi API, validate JSON
-│   └── requirements.txt
-├── Dockerfile
-├── compose.yaml           # đọc HF_TOKEN từ .env
+│   └── requirements.txt   # gọn: fastapi/uvicorn/requests (không torch)
+├── Dockerfile             # image api mỏng (python slim)
+├── compose.yaml           # service vllm + api, đọc HF_TOKEN từ .env
 ├── Makefile
 ├── .env.example           # mẫu, copy thành .env
 └── readme.md

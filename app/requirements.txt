@@ -1,8 +1,4 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-# Để mới nhất để nhận diện kiến trúc gemma-4 (model vừa phát hành)
-transformers
-accelerate
-sentencepiece==0.2.0
 requests==2.32.3
-# torch/CUDA/cuDNN do base image pytorch/pytorch cung cấp sẵn
+# Không cần torch/transformers nữa: vLLM (service riêng) lo phần chạy model.

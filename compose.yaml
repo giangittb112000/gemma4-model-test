@@ -1,38 +1,39 @@
 services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: gemma4-vllm
+    runtime: nvidia
+    ipc: host                      # vLLM cần shared memory lớn
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
+    command:
+      - --model=google/gemma-4-e2b-it
+      - --max-model-len=2048         # query ngắn -> không cần dài, tiết kiệm VRAM
+      - --gpu-memory-utilization=0.5 # chừa VRAM cho Ollama đang chạy chung GPU
+      - --port=8000
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+
   api:
     build: .
     container_name: gemma4-api
     ports:
       - "8000:8000"
-    # Dùng NVIDIA runtime (legacy) như hầu hết setup server đã cấu hình sẵn
-    # trong /etc/docker/daemon.json. Cách này tránh lỗi mount socket
-    # nvidia-persistenced mà khối `deploy.devices` (CDI) hay gặp.
-    runtime: nvidia
+    depends_on:
+      vllm:
+        condition: service_healthy
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      # Đặt trong file .env (đã gitignore): HF_TOKEN=hf_xxx
-      HF_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
+      VLLM_URL: "http://vllm:8000"
       MODEL_ID: "google/gemma-4-e2b-it"
-      MAX_NEW_TOKENS: "128"
-    volumes:
-      # cache trọng số HF để lần chạy sau không tải lại
-      - hf-cache:/root/.cache/huggingface
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import requests,sys; sys.exit(0 if requests.get('http://localhost:8000/health').json().get('status')=='ok' else 1)\""]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 60s
-    # Cách khác (Docker mới, cần nvidia-container-toolkit + CDI). Nếu muốn dùng
-    # thì XOÁ `runtime: nvidia` + 2 biến NVIDIA_* ở trên và bỏ comment khối này:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+      MAX_TOKENS: "128"
 
 volumes:
   hf-cache:
