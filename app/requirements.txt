@@ -5,4 +5,4 @@ transformers
 accelerate
 sentencepiece==0.2.0
 requests==2.32.3
-# torch được cài riêng trong Dockerfile (bản CUDA cu124)
+# torch/CUDA/cuDNN do base image pytorch/pytorch cung cấp sẵn

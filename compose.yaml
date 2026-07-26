@@ -4,7 +4,13 @@ services:
     container_name: gemma4-api
     ports:
       - "8000:8000"
+    # Dùng NVIDIA runtime (legacy) như hầu hết setup server đã cấu hình sẵn
+    # trong /etc/docker/daemon.json. Cách này tránh lỗi mount socket
+    # nvidia-persistenced mà khối `deploy.devices` (CDI) hay gặp.
+    runtime: nvidia
     environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       # Đặt trong file .env (đã gitignore): HF_TOKEN=hf_xxx
       HF_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
       MODEL_ID: "google/gemma-4-e2b-it"
@@ -18,15 +24,15 @@ services:
       timeout: 5s
       retries: 60
       start_period: 60s
-    # GPU NVIDIA (cần nvidia-container-toolkit trên host).
-    # Nếu chạy trên máy KHÔNG có GPU, xoá/nhận xét khối deploy này.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # Cách khác (Docker mới, cần nvidia-container-toolkit + CDI). Nếu muốn dùng
+    # thì XOÁ `runtime: nvidia` + 2 biến NVIDIA_* ở trên và bỏ comment khối này:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
 volumes:
   hf-cache:

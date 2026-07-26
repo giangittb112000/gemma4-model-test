@@ -120,7 +120,11 @@ docker compose up --build -d
 make test        # hoặc: curl localhost:8000/health  -> xem "device": "cuda:..."
 ```
 
-Dockerfile cài `torch` bản CUDA `cu124` (đổi sang `cu121`/`cu118` trong `Dockerfile` nếu driver cũ hơn). Code tự chọn dtype: `bfloat16` cho GPU Ampere+ (A100/RTX 30/40/L4), `float16` cho GPU cũ (T4). Latency kỳ vọng ~0.2–1s/query (thay vì ~80s trên CPU).
+Base image `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` đã có sẵn torch + CUDA 12.4 + cuDNN 9 (khớp phiên bản, build nhanh, ổn định). Code tự chọn dtype: `bfloat16` cho GPU Ampere+ (A100/RTX 30/40/L4), `float16` cho GPU cũ (T4). Latency kỳ vọng ~0.2–1s/query (thay vì ~80s trên CPU).
+
+`compose.yaml` dùng `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` — cách hầu hết server đã cấu hình sẵn (giống các dự án GPU khác của bạn), không cần setup thêm.
+
+> Nếu gặp lỗi `open /run/nvidia-persistenced/socket: no such file or directory`: đó là do dùng khối `deploy.devices` (đi qua CDI). Bản compose này đã tránh bằng `runtime: nvidia`.
 
 ### Chạy trên máy không có GPU (ví dụ Mac, chỉ để thử)
 
