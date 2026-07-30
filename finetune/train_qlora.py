@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import sys
 from pathlib import Path
+
+from prompt import SYSTEM_PROMPT
 
 # Giảm phân mảnh VRAM trước khi import torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -81,8 +84,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/models/adapters/query-parser-ft"),
     )
-    # Prompt trong train.json rất dài — 768 đủ smoke-test, đỡ OOM khi train.
-    p.add_argument("--max-seq-length", type=int, default=768)
+    # Khớp serve max_model_len=512 (prompt ngắn).
+    p.add_argument("--max-seq-length", type=int, default=512)
     p.add_argument("--epochs", type=float, default=3.0)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--batch-size", type=int, default=1)
@@ -247,7 +250,40 @@ def main() -> None:
         )
 
     train_ds = load_dataset("json", data_files=str(args.train_file), split="train")
+    # Chuẩn TRL/HF conversational SFT: mỗi mẫu có cột "messages"
+    #   [{"role":"system"|"user"|"model", "content": "..."}, ...]
+    # Gemma dùng role "model" (không phải "assistant").
+    # Tuỳ chọn shorthand: {query, output} → tự ghép messages (dùng SYSTEM_PROMPT).
+    if "messages" not in train_ds.column_names:
+        if "query" in train_ds.column_names and "output" in train_ds.column_names:
+
+            def to_messages(row: dict) -> dict:
+                out = row["output"]
+                if not isinstance(out, str):
+                    out = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+                return {
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f'query: "{row["query"]}"'},
+                        {"role": "model", "content": out},
+                    ]
+                }
+
+            train_ds = train_ds.map(
+                to_messages, remove_columns=train_ds.column_names
+            )
+        else:
+            raise SystemExit(
+                "train.json cần chuẩn thư viện: [{ \"messages\": ["
+                "{\"role\",\"content\"}, ...] }, ...]\n"
+                "Hoặc shorthand: [{ \"query\", \"output\" }, ...]"
+            )
+
     print(f"[train] samples={len(train_ds)}")
+    # In raw mẫu đầu — đúng thứ SFTTrainer nhận trước khi apply_chat_template.
+    sample0 = train_ds[0]["messages"]
+    print("[train] raw messages[0] (trl conversational):")
+    print(json.dumps(sample0, ensure_ascii=False, indent=2))
 
     use_bf16 = torch.cuda.is_bf16_supported()
     sft_kwargs = dict(
@@ -297,7 +333,7 @@ def main() -> None:
     trainer.model.save_pretrained(str(args.adapter_dir))
     tokenizer.save_pretrained(str(args.adapter_dir))
     print(f"[done] adapter -> {args.adapter_dir}")
-    print("       docker compose up -d  rồi  make test MODEL=query-parser-ft Q=\"...\"")
+    print("       docker compose up -d  rồi  make test Q=\"...\"")
 
 
 if __name__ == "__main__":

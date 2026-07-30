@@ -17,9 +17,11 @@ services:
       HF_HUB_CACHE: /root/.cache/huggingface
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
       MODEL_ID: "${MODEL_ID:-google/gemma-4-e2b-it}"
-      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1024}"
-      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.80}"
-      MAX_LORA_RANK: "${MAX_LORA_RANK:-64}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-512}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.85}"
+      MAX_NUM_SEQS: "${MAX_NUM_SEQS:-8}"
+      MAX_LORA_RANK: "${MAX_LORA_RANK:-16}"
+      ENFORCE_EAGER: "${ENFORCE_EAGER:-0}"
       ADAPTERS_DIR: /adapters
     entrypoint: ["/bin/bash", "/scripts/vllm-serve.sh"]
     volumes:

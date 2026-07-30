@@ -25,3 +25,4 @@ services:
       - ./models:/models
       - ./finetune/data:/workspace/data:ro
       - ./finetune/train_qlora.py:/workspace/train_qlora.py:ro
+      - ./finetune/prompt.py:/workspace/prompt.py:ro

@@ -1,12 +1,10 @@
-.PHONY: help up down logs wait test compare train models-list
+.PHONY: help up down logs wait ready test train models-list
 
 help:
-	@echo "make up / down / logs / wait"
-	@echo "make test                      - base (in rõ model trong output)"
-	@echo "make test Q=\"...\"              - 1 query trên base"
-	@echo "make test MODEL=query-parser-ft Q=\"...\""
-	@echo "make compare Q=\"...\"           - base + LoRA cùng query"
-	@echo "make train                     - QLoRA one-shot, xong thoát"
+	@echo "make up / down / logs"
+	@echo "make ready           - wait + warmup GPU (trước khi test/prod)"
+	@echo "make test Q=\"...\""
+	@echo "make train           - QLoRA → adapter"
 	@echo "make models-list"
 
 up:
@@ -24,34 +22,34 @@ wait:
 		printf '.'; sleep 5; \
 	done; echo " READY"
 
-# MODEL=... chọn model; mặc định google/gemma-4-e2b-it
+# wait + 1 request warm (tránh cold 3–6s lần đầu)
+ready: wait
+	@echo "Warmup query-parser-ft ..."
+	@python3 test_vllm.py --no-wait --no-warmup -m query-parser-ft "__warmup__" >/dev/null \
+		|| { echo "Warmup fail — đã train adapter chưa? models/adapters/query-parser-ft/"; exit 1; }
+	@echo " WARM"
+
 test:
+	@if [ ! -f models/adapters/query-parser-ft/adapter_config.json ]; then \
+		echo "Thiếu adapter. Chạy: make train"; exit 1; \
+	fi
 	@if [ -n "$(Q)" ]; then \
-		python3 test_vllm.py -m "$(or $(MODEL),google/gemma-4-e2b-it)" "$(Q)"; \
+		python3 test_vllm.py -m "$(or $(MODEL),query-parser-ft)" "$(Q)"; \
 	else \
-		python3 test_vllm.py -m "$(or $(MODEL),google/gemma-4-e2b-it)"; \
+		python3 test_vllm.py -m "$(or $(MODEL),query-parser-ft)"; \
 	fi
 
-compare:
-	@if [ -n "$(Q)" ]; then \
-		python3 test_vllm.py --compare "$(Q)"; \
-	else \
-		python3 test_vllm.py --compare; \
-	fi
-
-# One-shot: build → train → container xoá (--rm). Tự stop vLLM để nhả GPU.
 train:
 	@echo "Stopping vLLM / freeing GPU..."
 	-docker compose stop
 	@sleep 2
 	@nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true
 	docker compose -f compose.train.yaml run --rm train
+	@echo "Tiếp: make up && make ready && make test Q=\"dt ip 256\""
 
 models-list:
 	@if ! curl -sf localhost:8000/health >/dev/null; then \
-		echo "vLLM chưa chạy (localhost:8000)."; \
-		echo "  make up && make wait"; \
-		echo "  (make train đã stop vLLM — cần up lại sau khi train)"; \
+		echo "vLLM chưa chạy.  make up && make ready"; \
 		exit 1; \
 	fi
 	@curl -sf localhost:8000/v1/models | python3 -m json.tool

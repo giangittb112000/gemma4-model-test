@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Gọi trực tiếp API vLLM (/v1/chat/completions) với JSON schema.
+"""Gọi vLLM /v1/chat/completions + JSON schema.
 
-Cách dùng:
-  python3 test_vllm.py                              # base
-  python3 test_vllm.py -m query-parser-ft "dt ip"   # LoRA
-  python3 test_vllm.py --compare "dt ip 256"        # base + LoRA cùng lúc
-  make test Q="dt ip 256"
-  make compare Q="dt ip 256"
+Đo latency chuẩn cho perf search:
+  - model_ms  = TTFT + generation (thời gian engine sinh đủ response)
+  - e2e_ms    = client đo (gồm mạng)
+  - PERF {...} JSON 1 dòng / request — grep/parse sau này
+
+  make test Q="iphoooen 17 256"
 """
 
 from __future__ import annotations
@@ -18,11 +18,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+from typing import Any
 
 VLLM = os.environ.get("VLLM_URL", "http://localhost:8000").rstrip("/")
-DEFAULT_MODEL = os.environ.get("MODEL_ID", "google/gemma-4-e2b-it")
-BASE_MODEL = "google/gemma-4-e2b-it"
-FT_MODEL = "query-parser-ft"
+# Serve: base + LoRA (train = QLoRA). Test chỉ gọi adapter.
+DEFAULT_MODEL = os.environ.get("MODEL_ID", "query-parser-ft")
+
+# Cùng prompt với finetune/prompt.py (train ↔ serve).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "finetune"))
+from prompt import SYSTEM_PROMPT  # noqa: E402
 
 SCHEMA = {
     "type": "object",
@@ -37,52 +42,6 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-PROMPT = """\
-Bạn là bộ phân tích truy vấn tìm kiếm ecommerce tiếng Việt (điện thoại, tablet, laptop, phụ kiện).
-Nhiệm vụ: đọc query người dùng (thường viết tắt / không dấu / viết dính / sai chính tả / mô tả nhu cầu) \
-rồi trả về DUY NHẤT một JSON đúng schema sau, không giải thích thêm:
-{"category": string|null, "product": string|null, "brand": string|null, "model": string|null, "attributes": object}
-
-Quy tắc:
-1) Chuẩn hoá alias phổ biến:
-   - dt, đt → điện thoại
-   - ip, iph, iphon, i phone → iphone
-   - ss, sámung → samsung
-   - mi → xiaomi
-   - airpod, air pod → airpods
-   - prm, promax, prom → pro max
-   - 128/128g, 256/256g, 512/512g → 128gb, 256gb, 512gb
-2) category = ngành hàng rõ (điện thoại, tablet, laptop, tai nghe, phụ kiện...).
-3) product = dòng sản phẩm; brand = hãng; model chỉ khi có đời máy rõ.
-4) attributes: key viết thường. Gồm cả thông số tường minh và nhu cầu suy ra được.
-5) Soft-intent (nhu cầu mô tả) → map sang attributes có ngưỡng rõ:
-   - pin khủng / pin trâu / pin lâu → battery_mah_min = 5000
-   - cho sinh viên / giá rẻ / giá thấp / tầm trung thấp → price_max = 20000000
-   - chơi game / gaming → usage = gaming
-   - chụp đẹp / camera đẹp → camera = good
-   - mỏng nhẹ → form_factor = thin_light
-6) Chỉ điền thông tin suy ra được từ query. Thiếu → null / {}. Không bịa brand/product/model.
-
-Ví dụ:
-query: "dt ip 256"
-→ {"category":"điện thoại","product":"iphone","brand":"apple","model":null,"attributes":{"storage":"256gb"}}
-
-query: "ip 16 promax"
-→ {"category":"điện thoại","product":"iphone","brand":"apple","model":"16 pro max","attributes":{}}
-
-query: "điện thoại pin khủng"
-→ {"category":"điện thoại","product":null,"brand":null,"model":null,"attributes":{"battery_mah_min":5000}}
-
-query: "điện thoại cho sinh viên"
-→ {"category":"điện thoại","product":null,"brand":null,"model":null,"attributes":{"price_max":20000000}}
-
-query: "dt pin trâu dưới 10 triệu"
-→ {"category":"điện thoại","product":null,"brand":null,"model":null,"attributes":{"battery_mah_min":5000,"price_max":10000000}}
-
-query: "tai nghe"
-→ {"category":"tai nghe","product":null,"brand":null,"model":null,"attributes":{}}
-"""
-
 DEFAULT_QUERIES = [
     "dt ip 256",
     "ip 16 promax",
@@ -95,6 +54,8 @@ DEFAULT_QUERIES = [
 ]
 
 LINE = "─" * 64
+# JSON parse ~30–50 token; 64 đủ, cắt decode thừa.
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "64"))
 
 
 def post(path: str, payload: dict) -> dict:
@@ -124,21 +85,80 @@ def wait_ready(timeout: int = 1800) -> None:
     raise SystemExit(f"✗  vLLM not ready at {VLLM}")
 
 
-def parse(query: str, model: str) -> str:
-    body = {
+def chat_complete(query: str, model: str) -> tuple[str, dict[str, Any], float]:
+    """Trả (content, api_json, e2e_ms). e2e = client perf_counter đến khi nhận đủ body."""
+    body: dict[str, Any] = {
         "model": model,
         "temperature": 0,
-        "max_tokens": 128,
+        "max_tokens": MAX_TOKENS,
         "messages": [
-            {"role": "user", "content": f'{PROMPT}\n\nquery: "{query}"'},
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f'query: "{query}"'},
         ],
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "query_parse", "schema": SCHEMA},
         },
+        # vLLM với --enable-per-request-metrics → field metrics trong body.
+        "include_metrics": True,
     }
-    result = post("/v1/chat/completions", body)
-    return result["choices"][0]["message"]["content"]
+    t0 = time.perf_counter()
+    try:
+        result = post("/v1/chat/completions", body)
+    except urllib.error.HTTPError as exc:
+        # Image vLLM cũ: bỏ include_metrics rồi thử lại.
+        if exc.code in (400, 422) and "include_metrics" in body:
+            err = exc.read().decode(errors="replace")
+            if "include_metrics" in err or "metrics" in err.lower():
+                body.pop("include_metrics", None)
+                t0 = time.perf_counter()
+                result = post("/v1/chat/completions", body)
+            else:
+                raise
+        else:
+            raise
+    e2e_ms = (time.perf_counter() - t0) * 1000.0
+    content = result["choices"][0]["message"]["content"]
+    return content, result, e2e_ms
+
+
+def extract_perf(api: dict[str, Any], e2e_ms: float) -> dict[str, Any]:
+    """Chuẩn hoá metrics để log / tính perf search.
+
+    model_ms = TTFT + generation = thời gian engine từ lúc schedule đến token cuối
+    (không gồm queue; không gồm RTT mạng). Đây là số chính để đánh giá model.
+    """
+    usage = api.get("usage") or {}
+    metrics = api.get("metrics") or {}
+
+    ttft = metrics.get("time_to_first_token_ms")
+    gen = metrics.get("generation_time_ms")
+    queue = metrics.get("queue_time_ms")
+    tps = metrics.get("tokens_per_second")
+    mean_itl = metrics.get("mean_itl_ms")
+
+    model_ms: float | None = None
+    if isinstance(ttft, (int, float)) and isinstance(gen, (int, float)):
+        model_ms = float(ttft) + float(gen)
+    elif isinstance(ttft, (int, float)) and gen is None:
+        # 1 token / metrics thiếu generation: dùng TTFT ≈ toàn bộ
+        model_ms = float(ttft)
+
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+
+    return {
+        "model_ms": model_ms,
+        "e2e_ms": round(e2e_ms, 2),
+        "ttft_ms": ttft,
+        "generation_ms": gen,
+        "queue_ms": queue,
+        "mean_itl_ms": mean_itl,
+        "tokens_per_second": tps,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "metrics_source": "vllm" if metrics else "client_e2e_only",
+    }
 
 
 def pretty_json(raw: str) -> str:
@@ -149,15 +169,48 @@ def pretty_json(raw: str) -> str:
 
 
 def print_result(
-    index: int, total: int, query: str, model: str, raw: str, ms: float
+    index: int,
+    total: int,
+    query: str,
+    model: str,
+    raw: str,
+    perf: dict[str, Any],
 ) -> None:
     print(LINE)
     print(f"[{index}/{total}]  query     : {query}")
     print(f"         model      : {model}")
-    print(f"         latency    : {ms:,.0f} ms  ({ms / 1000:.2f} s)")
+    # Số chính cho search SLA / so model
+    if perf["model_ms"] is not None:
+        print(
+            f"         model_ms   : {perf['model_ms']:,.1f} ms"
+            f"  (ttft={perf['ttft_ms']} + gen={perf['generation_ms']})"
+        )
+    else:
+        print(
+            "         model_ms   : n/a"
+            "  (vLLM chưa trả metrics — restart với --enable-per-request-metrics)"
+        )
+    print(f"         e2e_ms     : {perf['e2e_ms']:,.1f} ms  (client, gồm mạng)")
+    if perf.get("queue_ms") is not None:
+        print(f"         queue_ms   : {perf['queue_ms']}")
+    if perf.get("tokens_per_second") is not None:
+        print(f"         tok/s      : {perf['tokens_per_second']}")
+    print(
+        f"         tokens     : prompt={perf.get('prompt_tokens')} "
+        f"completion={perf.get('completion_tokens')}"
+    )
     print("         result     :")
     for line in pretty_json(raw).splitlines():
         print(f"           {line}")
+    # 1 dòng machine-readable — grep '^PERF '
+    print(
+        "PERF "
+        + json.dumps(
+            {"query": query, "model": model, **perf},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
 
 
 def print_fail(index: int, total: int, query: str, model: str, err: str) -> None:
@@ -168,27 +221,50 @@ def print_fail(index: int, total: int, query: str, model: str, err: str) -> None
     print(f"         error      : {err}")
 
 
-def run_queries(queries: list[str], models: list[str]) -> int:
+def warmup(models: list[str]) -> None:
+    print(LINE)
+    print(" warmup  : 1 request/model (không tính vào summary)")
+    for model in models:
+        try:
+            _, api, e2e_ms = chat_complete("__warmup__", model)
+            perf = extract_perf(api, e2e_ms)
+            label = (
+                f"model_ms={perf['model_ms']:.1f}"
+                if perf["model_ms"] is not None
+                else f"e2e_ms={perf['e2e_ms']:.1f}"
+            )
+            print(f"         {model}: cold {label}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"         {model}: warmup fail ({exc})", file=sys.stderr)
+
+
+def run_queries(queries: list[str], models: list[str], do_warmup: bool) -> int:
     print(LINE)
     print(f" models  : {', '.join(models)}")
     print(f" endpoint: {VLLM}/v1/chat/completions")
     print(f" queries : {len(queries)}")
+    print(" metric  : model_ms = vLLM TTFT+generation (chuẩn perf search)")
     print(LINE)
 
+    if do_warmup:
+        warmup(models)
+
     ok = 0
-    times: list[float] = []
+    model_times: list[float] = []
+    e2e_times: list[float] = []
     total = len(queries) * len(models)
     n = 0
 
     for query in queries:
         for model in models:
             n += 1
-            start = time.time()
             try:
-                raw = parse(query, model)
-                ms = (time.time() - start) * 1000
-                times.append(ms)
-                print_result(n, total, query, model, raw, ms)
+                raw, api, e2e_ms = chat_complete(query, model)
+                perf = extract_perf(api, e2e_ms)
+                e2e_times.append(float(perf["e2e_ms"]))
+                if perf["model_ms"] is not None:
+                    model_times.append(float(perf["model_ms"]))
+                print_result(n, total, query, model, raw, perf)
                 ok += 1
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")
@@ -197,16 +273,22 @@ def run_queries(queries: list[str], models: list[str]) -> int:
                 print_fail(n, total, query, model, str(exc))
 
     print(LINE)
-    if times:
-        avg = sum(times) / len(times)
+    print(f" summary : {ok}/{total} ok")
+    if model_times:
         print(
-            f" summary : {ok}/{total} ok"
-            f"  |  avg {avg:,.0f} ms"
-            f"  |  min {min(times):,.0f} ms"
-            f"  |  max {max(times):,.0f} ms"
+            f" model_ms: avg {sum(model_times)/len(model_times):,.1f}"
+            f"  |  min {min(model_times):,.1f}"
+            f"  |  max {max(model_times):,.1f}"
+            f"  |  target <2000"
         )
     else:
-        print(f" summary : {ok}/{total} ok")
+        print(" model_ms: (không có — dùng e2e_ms tạm thời)")
+    if e2e_times:
+        print(
+            f" e2e_ms  : avg {sum(e2e_times)/len(e2e_times):,.1f}"
+            f"  |  min {min(e2e_times):,.1f}"
+            f"  |  max {max(e2e_times):,.1f}"
+        )
     print(LINE)
     return 0 if ok == total else 1
 
@@ -215,39 +297,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Test vLLM query parser (JSON schema)."
     )
-    parser.add_argument(
-        "queries",
-        nargs="*",
-        help='Query tùy chọn, ví dụ: "dt ip 256". Không truyền thì chạy bộ mặc định.',
-    )
+    parser.add_argument("queries", nargs="*", help='Query, ví dụ: "dt ip 256"')
     parser.add_argument(
         "-m",
         "--model",
         default=DEFAULT_MODEL,
-        help=f"Tên model trên /v1/models (mặc định: {DEFAULT_MODEL})",
+        help=f"Tên trên /v1/models (mặc định: {DEFAULT_MODEL})",
     )
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help=f"Chạy cùng query trên {BASE_MODEL} và {FT_MODEL} (1 API, lần lượt).",
-    )
-    parser.add_argument(
-        "--no-wait",
-        action="store_true",
-        help="Không chờ /health (giả định vLLM đã sẵn sàng).",
-    )
+    parser.add_argument("--no-wait", action="store_true")
+    parser.add_argument("--no-warmup", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     queries = args.queries or DEFAULT_QUERIES
-    models = [BASE_MODEL, FT_MODEL] if args.compare else [args.model]
 
     if not args.no_wait:
         wait_ready()
 
-    return run_queries(queries, models)
+    return run_queries(queries, [args.model], do_warmup=not args.no_warmup)
 
 
 if __name__ == "__main__":

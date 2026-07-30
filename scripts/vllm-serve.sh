@@ -1,31 +1,43 @@
 #!/usr/bin/env bash
-# Entrypoint vLLM: base (+ LoRA nếu có). Text-only — bỏ qua MM processor/video.
+# Entrypoint vLLM: base + LoRA. Knobs tối ưu latency search.
 set -euo pipefail
 
 MODEL_ID="${MODEL_ID:-google/gemma-4-e2b-it}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
-GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.80}"
-MAX_LORA_RANK="${MAX_LORA_RANK:-64}"
+# Prompt ngắn + JSON ngắn → 512 đủ, KV nhỏ hơn 1024.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-512}"
+GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.85}"
+# Khớp LoRA r=16 lúc train (đừng để 64 thừa VRAM).
+MAX_LORA_RANK="${MAX_LORA_RANK:-16}"
 ADAPTERS_DIR="${ADAPTERS_DIR:-/adapters}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+
+help_txt="$(python3 -m vllm.entrypoints.openai.api_server --help 2>&1 || true)"
 
 args=(
   --model="${MODEL_ID}"
   --max-model-len="${MAX_MODEL_LEN}"
   --gpu-memory-utilization="${GPU_MEM}"
-  --enforce-eager
+  --max-num-seqs="${MAX_NUM_SEQS}"
+  --enable-prefix-caching
   --port=8000
-  # Gemma 4 là multimodal; workload query-parser chỉ cần text.
-  # Tránh tải/init video+image+audio processor (dễ treo HF hub / bị docker stop giữa chừng).
   --limit-mm-per-prompt
   '{"image":0,"video":0,"audio":0}'
 )
 
-# Flag có trên vLLM mới — bỏ qua nếu image cũ không nhận.
-if python3 -c "import vllm,sys; sys.exit(0)" 2>/dev/null; then
-  if python3 -m vllm.entrypoints.openai.api_server --help 2>&1 | grep -q -- '--language-model-only'; then
-    args+=(--language-model-only)
-    echo "[vllm] --language-model-only"
-  fi
+if grep -q -- '--enable-per-request-metrics' <<<"${help_txt}"; then
+  args+=(--enable-per-request-metrics)
+  echo "[vllm] --enable-per-request-metrics"
+fi
+
+if [[ "${ENFORCE_EAGER}" == "1" ]]; then
+  args+=(--enforce-eager)
+  echo "[vllm] ENFORCE_EAGER=1"
+fi
+
+if grep -q -- '--language-model-only' <<<"${help_txt}"; then
+  args+=(--language-model-only)
+  echo "[vllm] --language-model-only"
 fi
 
 loras=()
@@ -42,8 +54,9 @@ if ((${#loras[@]} > 0)); then
   echo "[vllm] enable-lora: ${loras[*]}"
   args+=(--enable-lora --max-lora-rank="${MAX_LORA_RANK}" --lora-modules "${loras[@]}")
 else
-  echo "[vllm] no adapters in ${ADAPTERS_DIR} — serving base only"
+  echo "[vllm] WARN: không thấy adapter trong ${ADAPTERS_DIR} — chỉ base."
+  echo "[vllm]       Cần: make train  →  models/adapters/query-parser-ft/"
 fi
 
-echo "[vllm] starting: ${MODEL_ID}"
+echo "[vllm] starting: ${MODEL_ID} max_len=${MAX_MODEL_LEN} lora_rank=${MAX_LORA_RANK} eager=${ENFORCE_EAGER}"
 exec python3 -m vllm.entrypoints.openai.api_server "${args[@]}"

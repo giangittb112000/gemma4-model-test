@@ -1,53 +1,53 @@
 # Query Parser (test) — vLLM + QLoRA Docker
 
-Một API `:8000` (base + LoRA). Train tách file compose, chạy xong container thoát.
+- **Train:** QLoRA → `./models/adapters/query-parser-ft/`
+- **Serve:** base + LoRA adapter (không merge)
+- **Test:** chỉ `query-parser-ft`
 
-## Setup
+## Checklist đẩy server
 
 ```bash
-cp .env.example .env   # HF_TOKEN=hf_xxx
+cp .env.example .env          # HF_TOKEN=...
+# lần đầu: HF_HUB_OFFLINE=0 ; cache đủ rồi có thể =1
+
+make train                    # cần GPU trống
+make up && make ready         # wait + warmup (bỏ cold start)
+make test Q="iphoooen 17 256" # xem model_ms < 2000
 ```
 
-## Serve
+## Serve / test
 
 ```bash
-# Lần đầu: HF_HUB_OFFLINE=0, có mạng + HF_TOKEN. Cache đủ rồi mới đặt =1.
-docker compose up -d          # hoặc: make up
-make wait                     # chờ READY (có thể vài phút lần đầu)
-make models-list
+make up && make ready
 make test
 make test Q="dt ip 256"
-make compare Q="dt ip 256"
-
-# 2 lệnh test từng model (đổi Q tuỳ ý):
-make test MODEL=google/gemma-4-e2b-it Q="dt ip 256"
-make test MODEL=query-parser-ft Q="dt ip 256"
 ```
 
-Nếu log dừng ở video processor / `KeyboardInterrupt: terminated`: container bị stop khi đang tải HF — đừng `down` giữa chừng. Serve đã cấu hình text-only (`image/video/audio=0`).
+## Latency đã tối ưu sẵn
 
-## Train (one-shot)
+| Knob | Giá trị |
+|---|---|
+| `enforce-eager` | tắt (steady-state nhanh) |
+| prefix cache | bật |
+| `max_model_len` | 512 |
+| `max_lora_rank` | 16 (= train r) |
+| `max_tokens` (client) | 64 |
+| text-only / language-model-only | bật nếu image hỗ trợ |
+| prompt | ngắn, chung `finetune/prompt.py` |
+| `make ready` | warmup 1 request |
 
-Tắt serve / process GPU khác trước, rồi:
+Log: `model_ms` (chuẩn SLA), `e2e_ms`, dòng `PERF {...}`.
 
-```bash
-docker compose stop
-# nếu còn Ollama: sudo systemctl stop ollama  (hoặc docker stop ...)
-nvidia-smi   # free VRAM nên ~15GiB
-make train   # hoặc: docker compose -f compose.train.yaml run --rm train
-```
+## Data train
 
-Xong → `./models/adapters/query-parser-ft/` → `docker compose up -d` lại.
-
-Nếu OOM lúc prepare: script đã dùng prepare nhẹ (không upcast embedding). Vẫn OOM → tắt hết process GPU, hoặc giảm `--max-seq-length`.
+`finetune/data/train.json` — format TRL `messages` (`role`/`content`). Gemma: `role=model`.
 
 ## Cấu trúc
 
 ```text
-compose.yaml          # chỉ vLLM
-compose.train.yaml    # chỉ train, thoát khi xong
-finetune/             # Dockerfile + train_qlora.py + data/train.json
-models/adapters/      # output LoRA (mount)
-scripts/vllm-serve.sh # auto --enable-lora nếu có adapter
+compose.yaml / compose.train.yaml
+finetune/   # QLoRA, prompt.py, data/train.json
+models/adapters/
+scripts/vllm-serve.sh
 test_vllm.py
 ```
