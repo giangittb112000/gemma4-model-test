@@ -28,9 +28,18 @@ args=(
   '{"image":0,"video":0,"audio":0}'
 )
 
+# Thu thập timing per-request (body metrics +/hoặc HTTP headers).
 if grep -q -- '--enable-per-request-metrics' <<<"${help_txt}"; then
   args+=(--enable-per-request-metrics)
   echo "[vllm] --enable-per-request-metrics"
+fi
+if grep -q -- '--enable-request-stats-headers' <<<"${help_txt}"; then
+  args+=(--enable-request-stats-headers)
+  echo "[vllm] --enable-request-stats-headers"
+fi
+# Cần log-stats bật thì per-request metrics mới có (mặc định on; chỉ tránh disable).
+if grep -q -- '--disable-log-stats' <<<"${help_txt}"; then
+  : # không truyền --disable-log-stats
 fi
 
 if [[ "${ENFORCE_EAGER}" == "1" ]]; then

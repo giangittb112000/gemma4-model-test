@@ -58,7 +58,20 @@ LINE = "─" * 64
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "64"))
 
 
-def post(path: str, payload: dict) -> dict:
+def _hdr_float(headers: dict[str, str], *names: str) -> float | None:
+    for name in names:
+        raw = headers.get(name) or headers.get(name.lower())
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def post(path: str, payload: dict) -> tuple[dict, dict[str, str]]:
+    """Trả (json_body, response_headers lowercase)."""
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{VLLM}{path}",
@@ -67,7 +80,9 @@ def post(path: str, payload: dict) -> dict:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode())
+        body = json.loads(resp.read().decode())
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+        return body, headers
 
 
 def wait_ready(timeout: int = 1800) -> None:
@@ -85,8 +100,10 @@ def wait_ready(timeout: int = 1800) -> None:
     raise SystemExit(f"✗  vLLM not ready at {VLLM}")
 
 
-def chat_complete(query: str, model: str) -> tuple[str, dict[str, Any], float]:
-    """Trả (content, api_json, e2e_ms). e2e = client perf_counter đến khi nhận đủ body."""
+def chat_complete(
+    query: str, model: str
+) -> tuple[str, dict[str, Any], dict[str, str], float]:
+    """Trả (content, api_json, headers, e2e_ms)."""
     body: dict[str, Any] = {
         "model": model,
         "temperature": 0,
@@ -99,65 +116,132 @@ def chat_complete(query: str, model: str) -> tuple[str, dict[str, Any], float]:
             "type": "json_schema",
             "json_schema": {"name": "query_parse", "schema": SCHEMA},
         },
-        # vLLM với --enable-per-request-metrics → field metrics trong body.
+        # Body metrics (cần server --enable-per-request-metrics).
         "include_metrics": True,
     }
     t0 = time.perf_counter()
     try:
-        result = post("/v1/chat/completions", body)
+        result, headers = post("/v1/chat/completions", body)
     except urllib.error.HTTPError as exc:
-        # Image vLLM cũ: bỏ include_metrics rồi thử lại.
         if exc.code in (400, 422) and "include_metrics" in body:
             err = exc.read().decode(errors="replace")
             if "include_metrics" in err or "metrics" in err.lower():
                 body.pop("include_metrics", None)
                 t0 = time.perf_counter()
-                result = post("/v1/chat/completions", body)
+                result, headers = post("/v1/chat/completions", body)
             else:
                 raise
         else:
             raise
     e2e_ms = (time.perf_counter() - t0) * 1000.0
     content = result["choices"][0]["message"]["content"]
-    return content, result, e2e_ms
+    return content, result, headers, e2e_ms
 
 
-def extract_perf(api: dict[str, Any], e2e_ms: float) -> dict[str, Any]:
-    """Chuẩn hoá metrics để log / tính perf search.
+def extract_perf(
+    api: dict[str, Any], headers: dict[str, str], e2e_ms: float
+) -> dict[str, Any]:
+    """Gộp metrics từ body + header x-vllm-* + ước lượng client.
 
-    model_ms = TTFT + generation = thời gian engine từ lúc schedule đến token cuối
-    (không gồm queue; không gồm RTT mạng). Đây là số chính để đánh giá model.
+    e2e_ms   = đồng hồ client: gửi request → nhận đủ response (gồm mạng/proxy).
+    model_ms = thời gian engine (TTFT+decode hoặc inference header) — không gồm mạng.
     """
     usage = api.get("usage") or {}
     metrics = api.get("metrics") or {}
+    sources: list[str] = ["client_e2e"]
 
+    # --- body metrics (include_metrics) ---
     ttft = metrics.get("time_to_first_token_ms")
     gen = metrics.get("generation_time_ms")
     queue = metrics.get("queue_time_ms")
     tps = metrics.get("tokens_per_second")
     mean_itl = metrics.get("mean_itl_ms")
+    if metrics:
+        sources.append("body_metrics")
+
+    # --- HTTP headers (enable-request-stats-headers) ---
+    # Hỗ trợ cả x-vllm-* và x-* (tuỳ version).
+    h_total = _hdr_float(headers, "x-vllm-total-time", "x-total-time")
+    h_queue = _hdr_float(headers, "x-vllm-queue-time", "x-queue-time")
+    h_prefill = _hdr_float(headers, "x-vllm-prefill-time", "x-prefill-time")
+    h_decode = _hdr_float(headers, "x-vllm-decode-time", "x-decode-time")
+    h_infer = _hdr_float(headers, "x-vllm-inference-time", "x-inference-time")
+    h_tpot = _hdr_float(
+        headers, "x-vllm-time-per-output-token", "x-time-per-output-token"
+    )
+    h_cached = _hdr_float(headers, "x-vllm-cached-tokens", "x-cached-tokens")
+    h_prompt = _hdr_float(headers, "x-vllm-prompt-tokens", "x-prompt-tokens")
+    h_completion = _hdr_float(
+        headers, "x-vllm-completion-tokens", "x-completion-tokens"
+    )
+    if any(
+        v is not None
+        for v in (h_total, h_queue, h_prefill, h_decode, h_infer, h_cached)
+    ):
+        sources.append("headers")
+
+    if queue is None and h_queue is not None:
+        queue = h_queue
+    if ttft is None and h_prefill is not None:
+        # prefill ≈ TTFT khi không có queue tách riêng trong body
+        ttft = h_prefill
+    if gen is None and h_decode is not None:
+        gen = h_decode
+    if mean_itl is None and h_tpot is not None:
+        mean_itl = h_tpot
 
     model_ms: float | None = None
     if isinstance(ttft, (int, float)) and isinstance(gen, (int, float)):
         model_ms = float(ttft) + float(gen)
-    elif isinstance(ttft, (int, float)) and gen is None:
-        # 1 token / metrics thiếu generation: dùng TTFT ≈ toàn bộ
+    elif h_infer is not None:
+        model_ms = h_infer
+    elif isinstance(ttft, (int, float)):
         model_ms = float(ttft)
+    elif h_prefill is not None and h_decode is not None:
+        model_ms = h_prefill + h_decode
 
     prompt_tokens = usage.get("prompt_tokens")
+    if prompt_tokens is None and h_prompt is not None:
+        prompt_tokens = int(h_prompt)
     completion_tokens = usage.get("completion_tokens")
+    if completion_tokens is None and h_completion is not None:
+        completion_tokens = int(h_completion)
+
+    # usage chi tiết (một số bản vLLM/OpenAI)
+    cached_tokens = h_cached
+    ptd = usage.get("prompt_tokens_details") or {}
+    if cached_tokens is None and isinstance(ptd, dict):
+        cached_tokens = ptd.get("cached_tokens")
+
+    # Ước lượng phía client khi thiếu server metrics
+    e2e_tok_s: float | None = None
+    if completion_tokens and e2e_ms > 0:
+        e2e_tok_s = round(completion_tokens / (e2e_ms / 1000.0), 2)
+    if tps is None:
+        tps = e2e_tok_s
+
+    network_ms: float | None = None
+    if model_ms is not None:
+        network_ms = round(max(e2e_ms - model_ms, 0.0), 2)
 
     return {
-        "model_ms": model_ms,
+        "model_ms": round(model_ms, 2) if model_ms is not None else None,
         "e2e_ms": round(e2e_ms, 2),
+        "network_ms_est": network_ms,
         "ttft_ms": ttft,
         "generation_ms": gen,
+        "prefill_ms": h_prefill,
+        "decode_ms": h_decode,
+        "inference_ms": h_infer,
         "queue_ms": queue,
+        "server_total_ms": h_total,
         "mean_itl_ms": mean_itl,
         "tokens_per_second": tps,
+        "e2e_completion_tok_s": e2e_tok_s,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "metrics_source": "vllm" if metrics else "client_e2e_only",
+        "cached_tokens": cached_tokens,
+        "metrics_source": "+".join(sources),
     }
 
 
@@ -179,26 +263,43 @@ def print_result(
     print(LINE)
     print(f"[{index}/{total}]  query     : {query}")
     print(f"         model      : {model}")
-    # Số chính cho search SLA / so model
+    # model_ms = engine; e2e_ms = client (+mạng)
     if perf["model_ms"] is not None:
         print(
             f"         model_ms   : {perf['model_ms']:,.1f} ms"
-            f"  (ttft={perf['ttft_ms']} + gen={perf['generation_ms']})"
+            f"  (engine: ttft/prefill + decode)"
         )
     else:
         print(
             "         model_ms   : n/a"
-            "  (vLLM chưa trả metrics — restart với --enable-per-request-metrics)"
+            "  → make down && make up  (bật per-request-metrics / stats-headers)"
         )
-    print(f"         e2e_ms     : {perf['e2e_ms']:,.1f} ms  (client, gồm mạng)")
-    if perf.get("queue_ms") is not None:
-        print(f"         queue_ms   : {perf['queue_ms']}")
+    print(f"         e2e_ms     : {perf['e2e_ms']:,.1f} ms  (client: mạng + engine)")
+    if perf.get("network_ms_est") is not None:
+        print(f"         network~   : {perf['network_ms_est']:,.1f} ms  (e2e - model)")
+    bits = []
+    for key, label in (
+        ("queue_ms", "queue"),
+        ("prefill_ms", "prefill"),
+        ("ttft_ms", "ttft"),
+        ("decode_ms", "decode"),
+        ("generation_ms", "gen"),
+        ("inference_ms", "infer"),
+        ("server_total_ms", "srv_total"),
+        ("mean_itl_ms", "itl"),
+    ):
+        if perf.get(key) is not None:
+            bits.append(f"{label}={perf[key]}")
+    if bits:
+        print(f"         detail     : {' '.join(bits)}")
     if perf.get("tokens_per_second") is not None:
         print(f"         tok/s      : {perf['tokens_per_second']}")
     print(
         f"         tokens     : prompt={perf.get('prompt_tokens')} "
-        f"completion={perf.get('completion_tokens')}"
+        f"completion={perf.get('completion_tokens')} "
+        f"cached={perf.get('cached_tokens')}"
     )
+    print(f"         source     : {perf.get('metrics_source')}")
     print("         result     :")
     for line in pretty_json(raw).splitlines():
         print(f"           {line}")
@@ -226,8 +327,8 @@ def warmup(models: list[str]) -> None:
     print(" warmup  : 1 request/model (không tính vào summary)")
     for model in models:
         try:
-            _, api, e2e_ms = chat_complete("__warmup__", model)
-            perf = extract_perf(api, e2e_ms)
+            _, api, headers, e2e_ms = chat_complete("__warmup__", model)
+            perf = extract_perf(api, headers, e2e_ms)
             label = (
                 f"model_ms={perf['model_ms']:.1f}"
                 if perf["model_ms"] is not None
@@ -243,7 +344,7 @@ def run_queries(queries: list[str], models: list[str], do_warmup: bool) -> int:
     print(f" models  : {', '.join(models)}")
     print(f" endpoint: {VLLM}/v1/chat/completions")
     print(f" queries : {len(queries)}")
-    print(" metric  : model_ms = vLLM TTFT+generation (chuẩn perf search)")
+    print(" metric  : model_ms=engine | e2e_ms=client(+mạng)")
     print(LINE)
 
     if do_warmup:
@@ -259,8 +360,8 @@ def run_queries(queries: list[str], models: list[str], do_warmup: bool) -> int:
         for model in models:
             n += 1
             try:
-                raw, api, e2e_ms = chat_complete(query, model)
-                perf = extract_perf(api, e2e_ms)
+                raw, api, headers, e2e_ms = chat_complete(query, model)
+                perf = extract_perf(api, headers, e2e_ms)
                 e2e_times.append(float(perf["e2e_ms"]))
                 if perf["model_ms"] is not None:
                     model_times.append(float(perf["model_ms"]))

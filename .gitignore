@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 models/adapters/*
 !models/adapters/.gitkeep
+finetune/data/train_preview.jsonl
