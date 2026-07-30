@@ -2,5 +2,5 @@
 hf-cache/
 __pycache__/
 *.pyc
-finetune/.venv/
-finetune/outputs/
+models/adapters/*
+!models/adapters/.gitkeep

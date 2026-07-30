@@ -1,12 +1,13 @@
-.PHONY: help up down logs wait test restart
+.PHONY: help up down logs wait test compare train models-list
 
 help:
-	@echo "make up              - chạy vLLM"
-	@echo "make wait            - chờ model sẵn sàng"
-	@echo "make test            - chạy bộ query mặc định"
-	@echo "make test Q=\"...\"    - test 1 query tùy chọn"
-	@echo "make logs            - xem log"
-	@echo "make down            - dừng"
+	@echo "make up / down / logs / wait"
+	@echo "make test                      - base (in rõ model trong output)"
+	@echo "make test Q=\"...\"              - 1 query trên base"
+	@echo "make test MODEL=query-parser-ft Q=\"...\""
+	@echo "make compare Q=\"...\"           - base + LoRA cùng query"
+	@echo "make train                     - QLoRA one-shot, xong thoát"
+	@echo "make models-list"
 
 up:
 	docker compose up -d
@@ -23,15 +24,25 @@ wait:
 		printf '.'; sleep 5; \
 	done; echo " READY"
 
-# Ví dụ:
-#   make test
-#   make test Q="dt ip 256"
-#   make test Q="ss s24 ultra"
+# MODEL=... chọn model; mặc định google/gemma-4-e2b-it
 test:
 	@if [ -n "$(Q)" ]; then \
-		python3 test_vllm.py "$(Q)"; \
+		python3 test_vllm.py -m "$(or $(MODEL),google/gemma-4-e2b-it)" "$(Q)"; \
 	else \
-		python3 test_vllm.py; \
+		python3 test_vllm.py -m "$(or $(MODEL),google/gemma-4-e2b-it)"; \
 	fi
 
-restart: down up
+compare:
+	@if [ -n "$(Q)" ]; then \
+		python3 test_vllm.py --compare "$(Q)"; \
+	else \
+		python3 test_vllm.py --compare; \
+	fi
+
+# One-shot: build → train → container xoá (--rm). Tự stop vLLM để nhả GPU.
+train:
+	-docker compose stop
+	docker compose -f compose.train.yaml run --rm train
+
+models-list:
+	@curl -sf localhost:8000/v1/models | python3 -m json.tool

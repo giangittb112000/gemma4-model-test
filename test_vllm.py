@@ -2,10 +2,11 @@
 """Gọi trực tiếp API vLLM (/v1/chat/completions) với JSON schema.
 
 Cách dùng:
-  python3 test_vllm.py                  # chạy bộ query mặc định
-  python3 test_vllm.py "dt ip 256"      # test 1 query
-  python3 test_vllm.py "q1" "q2"        # test nhiều query
+  python3 test_vllm.py                              # base
+  python3 test_vllm.py -m query-parser-ft "dt ip"   # LoRA
+  python3 test_vllm.py --compare "dt ip 256"        # base + LoRA cùng lúc
   make test Q="dt ip 256"
+  make compare Q="dt ip 256"
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ import urllib.error
 import urllib.request
 
 VLLM = os.environ.get("VLLM_URL", "http://localhost:8000").rstrip("/")
-MODEL = os.environ.get("MODEL_ID", "google/gemma-4-e2b-it")
+DEFAULT_MODEL = os.environ.get("MODEL_ID", "google/gemma-4-e2b-it")
+BASE_MODEL = "google/gemma-4-e2b-it"
+FT_MODEL = "query-parser-ft"
 
 SCHEMA = {
     "type": "object",
@@ -121,9 +124,9 @@ def wait_ready(timeout: int = 1800) -> None:
     raise SystemExit(f"✗  vLLM not ready at {VLLM}")
 
 
-def parse(query: str) -> str:
+def parse(query: str, model: str) -> str:
     body = {
-        "model": MODEL,
+        "model": model,
         "temperature": 0,
         "max_tokens": 128,
         "messages": [
@@ -145,46 +148,53 @@ def pretty_json(raw: str) -> str:
         return raw
 
 
-def print_result(index: int, total: int, query: str, raw: str, ms: float) -> None:
+def print_result(
+    index: int, total: int, query: str, model: str, raw: str, ms: float
+) -> None:
     print(LINE)
     print(f"[{index}/{total}]  query     : {query}")
+    print(f"         model      : {model}")
     print(f"         latency    : {ms:,.0f} ms  ({ms / 1000:.2f} s)")
     print("         result     :")
     for line in pretty_json(raw).splitlines():
         print(f"           {line}")
 
 
-def print_fail(index: int, total: int, query: str, err: str) -> None:
+def print_fail(index: int, total: int, query: str, model: str, err: str) -> None:
     print(LINE)
     print(f"[{index}/{total}]  query     : {query}")
+    print(f"         model      : {model}")
     print(f"         status     : FAIL")
     print(f"         error      : {err}")
 
 
-def run_queries(queries: list[str]) -> int:
+def run_queries(queries: list[str], models: list[str]) -> int:
     print(LINE)
-    print(f" model   : {MODEL}")
+    print(f" models  : {', '.join(models)}")
     print(f" endpoint: {VLLM}/v1/chat/completions")
     print(f" queries : {len(queries)}")
     print(LINE)
 
     ok = 0
     times: list[float] = []
-    total = len(queries)
+    total = len(queries) * len(models)
+    n = 0
 
-    for i, query in enumerate(queries, 1):
-        start = time.time()
-        try:
-            raw = parse(query)
-            ms = (time.time() - start) * 1000
-            times.append(ms)
-            print_result(i, total, query, raw, ms)
-            ok += 1
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(errors="replace")
-            print_fail(i, total, query, f"HTTP {exc.code}: {body}")
-        except Exception as exc:  # noqa: BLE001
-            print_fail(i, total, query, str(exc))
+    for query in queries:
+        for model in models:
+            n += 1
+            start = time.time()
+            try:
+                raw = parse(query, model)
+                ms = (time.time() - start) * 1000
+                times.append(ms)
+                print_result(n, total, query, model, raw, ms)
+                ok += 1
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode(errors="replace")
+                print_fail(n, total, query, model, f"HTTP {exc.code}: {body}")
+            except Exception as exc:  # noqa: BLE001
+                print_fail(n, total, query, model, str(exc))
 
     print(LINE)
     if times:
@@ -211,6 +221,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help='Query tùy chọn, ví dụ: "dt ip 256". Không truyền thì chạy bộ mặc định.',
     )
     parser.add_argument(
+        "-m",
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Tên model trên /v1/models (mặc định: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help=f"Chạy cùng query trên {BASE_MODEL} và {FT_MODEL} (1 API, lần lượt).",
+    )
+    parser.add_argument(
         "--no-wait",
         action="store_true",
         help="Không chờ /health (giả định vLLM đã sẵn sàng).",
@@ -221,11 +242,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     queries = args.queries or DEFAULT_QUERIES
+    models = [BASE_MODEL, FT_MODEL] if args.compare else [args.model]
 
     if not args.no_wait:
         wait_ready()
 
-    return run_queries(queries)
+    return run_queries(queries, models)
 
 
 if __name__ == "__main__":

@@ -1,89 +1,47 @@
-# Query Parser Test — vLLM trực tiếp + JSON schema
+# Query Parser (test) — vLLM + QLoRA Docker
 
-Chỉ chạy **1 service**: `vllm/vllm-openai` với model `google/gemma-4-e2b-it`.  
-Test gọi thẳng API OpenAI-compatible của vLLM (`/v1/chat/completions`) kèm `response_format: json_schema`. Không có service API trung gian.
+Một API `:8000` (base + LoRA). Train tách file compose, chạy xong container thoát.
 
-## Chuẩn bị
+## Setup
 
 ```bash
-cp .env.example .env
-# sửa: HF_TOKEN=hf_xxx
+cp .env.example .env   # HF_TOKEN=hf_xxx
 ```
 
-Tắt tạm Ollama (hoặc service đang chiếm GPU) trước khi chạy.
-
-## Chạy trên server
+## Serve
 
 ```bash
-make up                 # start vLLM :8000
-make wait               # chờ model load xong
-make test               # bộ query mặc định
-make test Q="dt ip 256" # test 1 query tùy chọn
-make logs
-make down
+docker compose up -d          # hoặc: make up
+make wait
+make models-list                                   # xem model nào đang serve
+make test                                          # base — mỗi dòng in `model:`
+make test Q="dt ip 256"
+make compare Q="dt ip 256"                         # base + LoRA cùng query
+
+# 2 lệnh test từng model (đổi Q tuỳ ý):
+make test MODEL=google/gemma-4-e2b-it Q="dt ip 256"
+make test MODEL=query-parser-ft Q="dt ip 256"
 ```
 
-Hoặc gọi script trực tiếp:
+## Train (one-shot)
+
+Tắt serve trước (cùng GPU), rồi:
 
 ```bash
-python3 test_vllm.py
-python3 test_vllm.py "dt ip 256"
-python3 test_vllm.py "ss s24" "tai nghe bluetooth"
+docker compose stop
+docker compose -f compose.train.yaml run --rm train
+# hoặc: make train
 ```
 
-## Gọi tay (curl)
+Xong → `./models/adapters/query-parser-ft/` → `docker compose up -d` lại.
 
-```bash
-curl -s localhost:8000/health
+## Cấu trúc
 
-curl -s localhost:8000/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "google/gemma-4-e2b-it",
-    "temperature": 0,
-    "max_tokens": 128,
-    "messages": [
-      {
-        "role": "user",
-        "content": "Phân tích query ecommerce tiếng Việt, trả JSON schema cố định (category, product, brand, model, attributes). Thiếu thì null. query: \"dt ip 256\""
-      }
-    ],
-    "response_format": {
-      "type": "json_schema",
-      "json_schema": {
-        "name": "query_parse",
-        "schema": {
-          "type": "object",
-          "properties": {
-            "category": {"type": ["string", "null"]},
-            "product": {"type": ["string", "null"]},
-            "brand": {"type": ["string", "null"]},
-            "model": {"type": ["string", "null"]},
-            "attributes": {"type": "object"}
-          },
-          "required": ["category", "product", "brand", "model", "attributes"],
-          "additionalProperties": false
-        }
-      }
-    }
-  }'
-```
-
-## Ghi chú
-
-- Model cache tại `./hf-cache`. Sau lần tải đầu, đặt `HF_HUB_OFFLINE=1` trong `.env`.
-- JSON schema do vLLM ép lúc sinh token — không có sẵn trong model.
-- Script test: `test_vllm.py` (được `make test` gọi).
-
-## Fine-tune QLoRA (tách riêng)
-
-Luồng train **không đụng** `compose.yaml` / `make test` ở trên. Xem [`finetune/README.md`](finetune/README.md).
-
-Tóm tắt:
-
-```bash
-cd finetune && make train          # QLoRA + merge -> outputs/merged
-# từ root:
-docker compose -f compose.merged.yaml up -d   # vLLM merged :8001
-VLLM_URL=http://localhost:8001 MODEL_ID=query-parser-ft make test
+```text
+compose.yaml          # chỉ vLLM
+compose.train.yaml    # chỉ train, thoát khi xong
+finetune/             # Dockerfile + train_qlora.py + data/train.json
+models/adapters/      # output LoRA (mount)
+scripts/vllm-serve.sh # auto --enable-lora nếu có adapter
+test_vllm.py
 ```

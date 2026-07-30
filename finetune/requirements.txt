@@ -1,10 +1,8 @@
-torch
-transformers
-accelerate
-peft
-trl
-bitsandbytes
-datasets
+transformers>=4.51.0
+accelerate>=1.0.0
+peft>=0.14.0
+trl>=0.15.0
+bitsandbytes>=0.45.0
+datasets>=3.0.0
 sentencepiece
 protobuf
-python-dotenv

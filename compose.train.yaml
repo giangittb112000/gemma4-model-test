@@ -1,0 +1,25 @@
+# One-shot QLoRA — chạy xong container thoát và xoá (--rm).
+# Tắt vLLM trước (cùng GPU): docker compose stop
+#
+#   docker compose -f compose.train.yaml run --rm train
+
+services:
+  train:
+    build:
+      context: ./finetune
+      dockerfile: Dockerfile
+    runtime: nvidia
+    ipc: host
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN:?set HF_TOKEN in .env}"
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_CACHE: /root/.cache/huggingface
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+    volumes:
+      - ${HF_CACHE_DIR:-./hf-cache}:/root/.cache/huggingface
+      - ./models:/models
+      - ./finetune/data:/workspace/data:ro
+      - ./finetune/train_qlora.py:/workspace/train_qlora.py:ro

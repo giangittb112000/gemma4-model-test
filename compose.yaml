@@ -1,3 +1,6 @@
+# Serve only — base + LoRA adapters trên :8000
+# Train: docker compose -f compose.train.yaml run --rm train
+
 services:
   vllm:
     image: vllm/vllm-openai:latest
@@ -13,14 +16,16 @@ services:
       HF_HOME: /root/.cache/huggingface
       HF_HUB_CACHE: /root/.cache/huggingface
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
-    command:
-      - --model=google/gemma-4-e2b-it
-      - --max-model-len=1024
-      - --gpu-memory-utilization=0.85
-      - --enforce-eager
-      - --port=8000
+      MODEL_ID: "${MODEL_ID:-google/gemma-4-e2b-it}"
+      MAX_MODEL_LEN: "${MAX_MODEL_LEN:-1024}"
+      GPU_MEMORY_UTILIZATION: "${GPU_MEMORY_UTILIZATION:-0.80}"
+      MAX_LORA_RANK: "${MAX_LORA_RANK:-64}"
+      ADAPTERS_DIR: /adapters
+    entrypoint: ["/bin/bash", "/scripts/vllm-serve.sh"]
     volumes:
       - ${HF_CACHE_DIR:-./hf-cache}:/root/.cache/huggingface
+      - ./models/adapters:/adapters:ro
+      - ./scripts:/scripts:ro
     healthcheck:
       test:
         [
