@@ -30,11 +30,15 @@ make test Q="dt ip 256"
 | `enforce-eager` | tắt (steady-state nhanh) |
 | prefix cache | bật |
 | `max_model_len` | 512 |
+| `gpu_memory_utilization` | **0.92** (tránh lỗi hết KV cache trên 16GB) |
+| `max_num_seqs` | 4 |
 | `max_lora_rank` | 16 (= train r) |
 | `max_tokens` (client) | 64 |
 | text-only / language-model-only | bật nếu image hỗ trợ |
 | prompt | ngắn, chung `finetune/prompt.py` |
 | `make ready` | warmup 1 request |
+
+Nếu vẫn `No available memory for the cache blocks`: trong `.env` thử `GPU_MEMORY_UTILIZATION=0.95` hoặc `ENFORCE_EAGER=1`, rồi `make down && make up`.
 
 Log: `model_ms` (chuẩn SLA), `e2e_ms`, dòng `PERF {...}`.
 

@@ -5,11 +5,14 @@ set -euo pipefail
 MODEL_ID="${MODEL_ID:-google/gemma-4-e2b-it}"
 # Prompt ngắn + JSON ngắn → 512 đủ, KV nhỏ hơn 1024.
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-512}"
-GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.85}"
+# Gemma4-E2B (multimodal weights) + CUDA graph profile trên 16GB dễ hết chỗ KV
+# nếu util quá thấp. Log vLLM gợi ý ~0.86; dùng 0.92 cho A4000 16GB.
+GPU_MEM="${GPU_MEMORY_UTILIZATION:-0.92}"
 # Khớp LoRA r=16 lúc train (đừng để 64 thừa VRAM).
 MAX_LORA_RANK="${MAX_LORA_RANK:-16}"
 ADAPTERS_DIR="${ADAPTERS_DIR:-/adapters}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
+# Ít seq đồng thời → ít KV hơn lúc profile/start.
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 
 help_txt="$(python3 -m vllm.entrypoints.openai.api_server --help 2>&1 || true)"
