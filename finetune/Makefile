@@ -5,7 +5,7 @@ help:
 	@echo "make clean   - xoá outputs/"
 
 train:
-	python train_qlora.py
+	python3 train_qlora.py
 
 clean:
 	rm -rf outputs
