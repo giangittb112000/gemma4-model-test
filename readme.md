@@ -25,15 +25,18 @@ make test MODEL=query-parser-ft Q="dt ip 256"
 
 ## Train (one-shot)
 
-Tắt serve trước (cùng GPU), rồi:
+Tắt serve / process GPU khác trước, rồi:
 
 ```bash
 docker compose stop
-docker compose -f compose.train.yaml run --rm train
-# hoặc: make train
+# nếu còn Ollama: sudo systemctl stop ollama  (hoặc docker stop ...)
+nvidia-smi   # free VRAM nên ~15GiB
+make train   # hoặc: docker compose -f compose.train.yaml run --rm train
 ```
 
 Xong → `./models/adapters/query-parser-ft/` → `docker compose up -d` lại.
+
+Nếu OOM lúc prepare: script đã dùng prepare nhẹ (không upcast embedding). Vẫn OOM → tắt hết process GPU, hoặc giảm `--max-seq-length`.
 
 ## Cấu trúc
 

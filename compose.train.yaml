@@ -18,6 +18,8 @@ services:
       HF_HOME: /root/.cache/huggingface
       HF_HUB_CACHE: /root/.cache/huggingface
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
     volumes:
       - ${HF_CACHE_DIR:-./hf-cache}:/root/.cache/huggingface
       - ./models:/models

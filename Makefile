@@ -41,7 +41,10 @@ compare:
 
 # One-shot: build → train → container xoá (--rm). Tự stop vLLM để nhả GPU.
 train:
+	@echo "Stopping vLLM / freeing GPU..."
 	-docker compose stop
+	@sleep 2
+	@nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true
 	docker compose -f compose.train.yaml run --rm train
 
 models-list:

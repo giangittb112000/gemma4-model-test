@@ -8,9 +8,13 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 from pathlib import Path
+
+# Giảm phân mảnh VRAM trước khi import torch.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def preflight() -> None:
@@ -39,18 +43,29 @@ def preflight() -> None:
     if not torch.cuda.is_available():
         raise SystemExit(
             "Không thấy GPU CUDA.\n"
-            "- Tắt vLLM/Ollama đang chiếm GPU: docker compose stop\n"
+            "- Tắt vLLM/Ollama: docker compose stop && sudo systemctl stop ollama\n"
             "- Kiểm tra: nvidia-smi"
         )
 
-    print(f"[ok] torch {torch.__version__} | GPU: {torch.cuda.get_device_name(0)}")
+    free, total = torch.cuda.mem_get_info()
+    free_gb, total_gb = free / (1024**3), total / (1024**3)
+    print(
+        f"[ok] torch {torch.__version__} | GPU: {torch.cuda.get_device_name(0)} "
+        f"| free {free_gb:.1f}/{total_gb:.1f} GiB"
+    )
+    if free_gb < 12.0:
+        print(
+            f"[warn] VRAM trống chỉ {free_gb:.1f} GiB — dễ OOM.\n"
+            "       Tắt hết process GPU khác (vLLM/Ollama), rồi: nvidia-smi",
+            file=sys.stderr,
+        )
 
 
 preflight()
 
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig, SFTTrainer
 
@@ -66,7 +81,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/models/adapters/query-parser-ft"),
     )
-    p.add_argument("--max-seq-length", type=int, default=1024)
+    # Prompt trong train.json rất dài — 768 đủ smoke-test, đỡ OOM khi train.
+    p.add_argument("--max-seq-length", type=int, default=768)
     p.add_argument("--epochs", type=float, default=3.0)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--batch-size", type=int, default=1)
@@ -78,6 +94,46 @@ def parse_args() -> argparse.Namespace:
 
 def load_token() -> str | None:
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+
+def vram(tag: str) -> None:
+    free, total = torch.cuda.mem_get_info()
+    used = (total - free) / (1024**3)
+    print(f"[vram:{tag}] used={used:.2f} GiB  free={free / (1024**3):.2f} GiB")
+
+
+def count_linear4bit(model) -> int:
+    return sum(1 for m in model.modules() if m.__class__.__name__ == "Linear4bit")
+
+
+def prepare_for_kbit_light(model):
+    """Thay peft.prepare_model_for_kbit_training — tránh upcast embedding → OOM 16GB.
+
+    peft mặc định ép mọi tensor fp16/bf16 (kể cả embedding) sang fp32, dễ xin thêm
+    ~8GB một lần. Ở đây chỉ freeze + upcast *Norm + bật grad checkpoint.
+    """
+    model.config.use_cache = False
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for module in model.modules():
+        name = module.__class__.__name__.lower()
+        if "norm" not in name:
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is not None and weight.dtype in (torch.float16, torch.bfloat16):
+            module.to(torch.float32)
+
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    else:
+        def _require_grad(_module, _inp, output):
+            output.requires_grad_(True)
+
+        model.get_input_embeddings().register_forward_hook(_require_grad)
+
+    model.gradient_checkpointing_enable()
+    return model
 
 
 def build_model_and_tokenizer(
@@ -103,39 +159,45 @@ def build_model_and_tokenizer(
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
     try:
+        # Không truyền torch_dtype cùng quantization_config — tránh load lệch dtype.
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             quantization_config=bnb,
-            device_map="auto",
+            device_map={"": 0},
             token=token,
-            torch_dtype=compute_dtype,
             attn_implementation="sdpa",
         )
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
             f"Không load được model ({exc}).\n"
-            "Tắt vLLM trước khi train; kiểm tra nvidia-smi / VRAM."
+            "Tắt vLLM/Ollama trước khi train; kiểm tra nvidia-smi / VRAM."
         ) from exc
 
-    model = prepare_model_for_kbit_training(model)
-    model.gradient_checkpointing_enable()
+    n4 = count_linear4bit(model)
+    print(f"[train] Linear4bit layers: {n4}")
+    if n4 == 0:
+        raise SystemExit(
+            "Model không vào 4-bit (0 Linear4bit). "
+            "Nâng transformers/bitsandbytes trong image rồi build lại."
+        )
+    vram("after-load")
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    model = prepare_for_kbit_light(model)
+    vram("after-prepare")
+
     lora = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
+        # Ít module hơn → ít VRAM gradient; đủ cho smoke-test.
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     )
     return model, tokenizer, lora
 
@@ -158,12 +220,14 @@ def main() -> None:
     print(f"[train] model={args.model_id}")
     print(f"[train] train_file={args.train_file}")
     print(f"[train] adapter_dir={args.adapter_dir}")
+    print(f"[train] max_seq_length={args.max_seq_length}")
 
     model, tokenizer, lora_cfg = build_model_and_tokenizer(
         args.model_id, token, args.lora_r, args.lora_alpha
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
+    vram("after-lora")
 
     train_ds = load_dataset("json", data_files=str(args.train_file), split="train")
     print(f"[train] samples={len(train_ds)}")
@@ -186,6 +250,8 @@ def main() -> None:
         report_to="none",
         seed=42,
         gradient_checkpointing=True,
+        # Tránh lưu optimizer state vào disk/VRAM không cần thiết cho test.
+        save_total_limit=1,
     )
     try:
         sft_args = SFTConfig(**sft_kwargs, max_length=args.max_seq_length)
@@ -212,7 +278,7 @@ def main() -> None:
     trainer.model.save_pretrained(str(args.adapter_dir))
     tokenizer.save_pretrained(str(args.adapter_dir))
     print(f"[done] adapter -> {args.adapter_dir}")
-    print("       docker compose up -d  rồi  MODEL_ID=query-parser-ft make test")
+    print("       docker compose up -d  rồi  make test MODEL=query-parser-ft Q=\"...\"")
 
 
 if __name__ == "__main__":
