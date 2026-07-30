@@ -190,14 +190,16 @@ def build_model_and_tokenizer(
     model = prepare_for_kbit_light(model)
     vram("after-prepare")
 
+    # Gemma 4: vision/audio dùng Gemma4ClippableLinear — PEFT không hỗ trợ.
+    # List kiểu ["q_proj", ...] sẽ match cả tower multimodal → crash.
+    # Regex chỉ language_model (cùng convention peft>=0.19 default cho gemma4).
     lora = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
-        # Ít module hơn → ít VRAM gradient; đủ cho smoke-test.
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        target_modules=r".*language_model\..*\.(q_proj|k_proj|v_proj|o_proj)",
     )
     return model, tokenizer, lora
 
@@ -225,9 +227,24 @@ def main() -> None:
     model, tokenizer, lora_cfg = build_model_and_tokenizer(
         args.model_id, token, args.lora_r, args.lora_alpha
     )
-    model = get_peft_model(model, lora_cfg)
+    try:
+        model = get_peft_model(model, lora_cfg)
+    except ValueError as exc:
+        if "Gemma4ClippableLinear" not in str(exc):
+            raise
+        raise SystemExit(
+            f"PEFT từ chối Gemma4ClippableLinear ({exc}).\n"
+            "Script đã dùng regex language_model — nếu vẫn lỗi: "
+            "rebuild image (pip peft mới) hoặc báo lại full traceback."
+        ) from exc
     model.print_trainable_parameters()
     vram("after-lora")
+    if model.get_nb_trainable_parameters()[0] == 0:
+        raise SystemExit(
+            "0 trainable params — regex target_modules không khớp architecture. "
+            "In vài tên module: "
+            + ", ".join(n for n, _ in list(model.named_modules())[:30])
+        )
 
     train_ds = load_dataset("json", data_files=str(args.train_file), split="train")
     print(f"[train] samples={len(train_ds)}")
@@ -250,7 +267,9 @@ def main() -> None:
         report_to="none",
         seed=42,
         gradient_checkpointing=True,
-        # Tránh lưu optimizer state vào disk/VRAM không cần thiết cho test.
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        # Gemma 4 multimodal: giữ cột phụ nếu collator/model cần.
+        remove_unused_columns=False,
         save_total_limit=1,
     )
     try:
