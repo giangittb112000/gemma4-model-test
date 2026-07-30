@@ -11,17 +11,20 @@ cp .env.example .env   # HF_TOKEN=hf_xxx
 ## Serve
 
 ```bash
+# Lần đầu: HF_HUB_OFFLINE=0, có mạng + HF_TOKEN. Cache đủ rồi mới đặt =1.
 docker compose up -d          # hoặc: make up
-make wait
-make models-list                                   # xem model nào đang serve
-make test                                          # base — mỗi dòng in `model:`
+make wait                     # chờ READY (có thể vài phút lần đầu)
+make models-list
+make test
 make test Q="dt ip 256"
-make compare Q="dt ip 256"                         # base + LoRA cùng query
+make compare Q="dt ip 256"
 
 # 2 lệnh test từng model (đổi Q tuỳ ý):
 make test MODEL=google/gemma-4-e2b-it Q="dt ip 256"
 make test MODEL=query-parser-ft Q="dt ip 256"
 ```
+
+Nếu log dừng ở video processor / `KeyboardInterrupt: terminated`: container bị stop khi đang tải HF — đừng `down` giữa chừng. Serve đã cấu hình text-only (`image/video/audio=0`).
 
 ## Train (one-shot)
 

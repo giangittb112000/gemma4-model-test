@@ -48,4 +48,10 @@ train:
 	docker compose -f compose.train.yaml run --rm train
 
 models-list:
+	@if ! curl -sf localhost:8000/health >/dev/null; then \
+		echo "vLLM chưa chạy (localhost:8000)."; \
+		echo "  make up && make wait"; \
+		echo "  (make train đã stop vLLM — cần up lại sau khi train)"; \
+		exit 1; \
+	fi
 	@curl -sf localhost:8000/v1/models | python3 -m json.tool
