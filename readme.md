@@ -74,3 +74,16 @@ curl -s localhost:8000/v1/chat/completions \
 - Model cache tại `./hf-cache`. Sau lần tải đầu, đặt `HF_HUB_OFFLINE=1` trong `.env`.
 - JSON schema do vLLM ép lúc sinh token — không có sẵn trong model.
 - Script test: `test_vllm.py` (được `make test` gọi).
+
+## Fine-tune QLoRA (tách riêng)
+
+Luồng train **không đụng** `compose.yaml` / `make test` ở trên. Xem [`finetune/README.md`](finetune/README.md).
+
+Tóm tắt:
+
+```bash
+cd finetune && make train          # QLoRA + merge -> outputs/merged
+# từ root:
+docker compose -f compose.merged.yaml up -d   # vLLM merged :8001
+VLLM_URL=http://localhost:8001 MODEL_ID=query-parser-ft make test
+```

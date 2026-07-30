@@ -17,7 +17,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any
 
 VLLM = os.environ.get("VLLM_URL", "http://localhost:8000").rstrip("/")
 MODEL = os.environ.get("MODEL_ID", "google/gemma-4-e2b-it")
@@ -35,7 +34,6 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-# Prompt rút từ search_report.csv + synony.json + soft-intent (pin khủng, sinh viên...).
 PROMPT = """\
 Bạn là bộ phân tích truy vấn tìm kiếm ecommerce tiếng Việt (điện thoại, tablet, laptop, phụ kiện).
 Nhiệm vụ: đọc query người dùng (thường viết tắt / không dấu / viết dính / sai chính tả / mô tả nhu cầu) \
