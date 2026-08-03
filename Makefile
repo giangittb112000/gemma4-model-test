@@ -1,11 +1,15 @@
-.PHONY: help up down logs wait ready test train models-list
+.PHONY: help up down logs wait ready test data train models-list
 
 help:
 	@echo "make up / down / logs"
 	@echo "make ready           - wait + warmup GPU (trước khi test/prod)"
+	@echo "make data            - local: gom seeds → train.json (rồi commit train.json)"
 	@echo "make test Q=\"...\""
-	@echo "make train           - QLoRA → adapter"
+	@echo "make train           - QLoRA từ train.json → adapter"
 	@echo "make models-list"
+
+data:
+	python3 finetune/build_train_from_seeds.py
 
 up:
 	docker compose up -d
@@ -40,12 +44,13 @@ test:
 	fi
 
 train:
+	@test -f finetune/data/train.json || { echo "Thiếu finetune/data/train.json — chạy make data trên local rồi commit/push."; exit 1; }
 	@echo "Stopping vLLM / freeing GPU..."
 	-docker compose stop
 	@sleep 2
 	@nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true
 	docker compose -f compose.train.yaml run --rm train
-	@echo "Tiếp: make up && make ready && make test Q=\"dt ip 256\""
+	@echo "Tiếp: make up && make ready && make test Q=\"ip17 256\""
 
 models-list:
 	@if ! curl -sf localhost:8000/health >/dev/null; then \

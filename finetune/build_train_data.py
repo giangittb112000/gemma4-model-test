@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Tạo finetune/data/train.json từ data/search_report.csv + data/synony.json.
+"""[Legacy] Heuristic train từ CSV + synony.
 
-  python3 finetune/build_train_data.py
+Pipeline chính: finetune/build_train_from_seeds.py (make data) —
+gom finetune/data/finetune/*.json → train.json.
+
   python3 finetune/build_train_data.py --limit 200 --out finetune/data/train.json
 """
 
@@ -153,24 +155,27 @@ def detect_storage(q: str) -> str | None:
     return None
 
 
-def soft_attrs(q: str) -> dict:
+def soft_spec(q: str) -> list[str]:
+    """Soft-intent → list token string (không dùng object)."""
     ql = q.lower()
-    attrs: dict = {}
+    spec: list[str] = []
     if any(x in ql for x in ("pin khủng", "pin trâu", "pin lâu")):
-        attrs["battery_mah_min"] = 5000
+        spec.append("battery_mah_min=5000")
     if any(x in ql for x in ("sinh viên", "giá rẻ", "giá thấp", "tầm trung thấp")):
-        attrs["price_max"] = 20000000
+        spec.append("price_max=20000000")
     if "dưới 10 triệu" in ql or "duoi 10 trieu" in ql:
-        attrs["price_max"] = 10000000
+        # ghi đè mức thấp hơn nếu vừa match sinh viên
+        spec = [s for s in spec if not s.startswith("price_max=")]
+        spec.append("price_max=10000000")
     if any(x in ql for x in ("gaming", "chơi game")):
-        attrs["usage"] = "gaming"
+        spec.append("gaming")
     if any(x in ql for x in ("camera đẹp", "chụp đẹp")):
-        attrs["camera"] = "good"
+        spec.append("camera=good")
     if "mỏng nhẹ" in ql:
-        attrs["form_factor"] = "thin_light"
+        spec.append("thin_light")
     if any(x in ql for x in ("cũ", "like new", "cấn")):
-        attrs["condition"] = "used"
-    return attrs
+        spec.append("used")
+    return spec
 
 
 def normalize_model_token(s: str) -> str:
@@ -233,10 +238,10 @@ def label_query(raw_query: str, rules: list[tuple[list[str], str]]) -> dict:
     q0 = raw_query.strip()
     q = apply_synonym(q0, rules)
 
-    attrs = soft_attrs(q)
+    spec = soft_spec(q)
     storage = detect_storage(q)
     if storage:
-        attrs["storage"] = storage
+        spec.insert(0, storage)
 
     category = detect_category(q)
     brand = detect_brand(q)
@@ -293,7 +298,9 @@ def label_query(raw_query: str, rules: list[tuple[list[str], str]]) -> dict:
         category = category or "tablet"
         product = product or "ipad"
         brand = brand or "apple"
-        mm = re.search(r"ipad\s*(air|pro|mini)?\s*([0-9a-z\.]*)", ql)
+        mm = re.search(
+            r"ipad\s*(air|pro|mini)?(?:\s*([0-9][0-9a-z\.]*|m\d))?", ql
+        )
         if mm:
             parts = [x for x in (mm.group(1), mm.group(2)) if x]
             model = " ".join(parts) or None
@@ -310,10 +317,15 @@ def label_query(raw_query: str, rules: list[tuple[list[str], str]]) -> dict:
         product = product or "apple watch"
         brand = brand or "apple"
 
-    # chỉ brand (samsung, xiaomi, …)
-    if product is None and brand and category is None:
-        if brand in ("samsung", "xiaomi", "oppo", "vivo", "realme"):
-            category = "điện thoại"
+    # chỉ hãng (samsung, xiaomi, …) → product = tên hãng (schema không còn brand)
+    if product is None and brand:
+        if brand in ("samsung", "xiaomi", "oppo", "vivo", "realme", "apple", "dell", "lenovo"):
+            category = category or (
+                "điện thoại"
+                if brand in ("samsung", "xiaomi", "oppo", "vivo", "realme", "apple")
+                else None
+            )
+            product = brand
 
     # category-only keywords
     if category is None:
@@ -331,22 +343,16 @@ def label_query(raw_query: str, rules: list[tuple[list[str], str]]) -> dict:
                 "máy ảnh": "máy ảnh",
             }[ql]
 
-    # product không được trùng brand trừ dòng đặc thù
-    if product == brand and product not in ("xiaomi",):
-        # "product": "xiaomi" là sai schema — để null nếu chỉ là brand search
-        if model is None and category and brand:
-            product = None
-
-    # laptop xiaomi → product null
-    if category == "laptop" and brand and product == brand:
-        product = None
+    # gộp đời máy vào product (schema: category / product / spec)
+    if product and model:
+        product = f"{product} {model}".strip()
+    elif model and not product:
+        product = model
 
     return {
         "category": category,
         "product": product,
-        "brand": brand,
-        "model": model,
-        "attributes": attrs,
+        "spec": spec,
     }
 
 
@@ -392,7 +398,6 @@ def main() -> None:
     ap.add_argument("--csv", type=Path, default=ROOT / "data" / "search_report.csv")
     ap.add_argument("--synony", type=Path, default=ROOT / "data" / "synony.json")
     ap.add_argument("--out", type=Path, default=ROOT / "finetune" / "data" / "train.json")
-    ap.add_argument("--preview", type=Path, default=ROOT / "finetune" / "data" / "train_preview.jsonl")
     ap.add_argument("--limit", type=int, default=200)
     ap.add_argument("--with-synonym-variants", action="store_true", default=True)
     ap.add_argument("--max-total", type=int, default=350, help="Giới hạn tổng mẫu (keyword+variant)")
@@ -410,7 +415,6 @@ def main() -> None:
                 break
 
     samples: list[dict] = []
-    preview: list[dict] = []
     seen_q: set[str] = set()
 
     for kw in keywords:
@@ -420,7 +424,6 @@ def main() -> None:
         seen_q.add(key)
         out = label_query(kw, rules)
         samples.append(to_messages(kw, out))
-        preview.append({"query": kw, "output": out})
 
         if args.with_synonym_variants and len(samples) < args.max_total:
             for alias in synonym_variants(kw, rules):
@@ -430,7 +433,6 @@ def main() -> None:
                 seen_q.add(ak)
                 labeled = label_query(alias, rules)
                 samples.append(to_messages(alias, labeled))
-                preview.append({"query": alias, "output": labeled, "from": kw})
                 if len(samples) >= args.max_total:
                     break
 
@@ -438,15 +440,14 @@ def main() -> None:
     args.out.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    with args.preview.open("w", encoding="utf-8") as f:
-        for row in preview:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    # stats
-    filled = sum(1 for p in preview if p["output"].get("category") or p["output"].get("brand"))
+    filled = 0
+    for s in samples:
+        o = json.loads(s["messages"][-1]["content"])
+        if o.get("category") or o.get("product"):
+            filled += 1
     print(f"[ok] keywords={len(keywords)} samples={len(samples)} -> {args.out}")
-    print(f"     preview={args.preview} (query+output dễ review)")
-    print(f"     có category/brand: {filled}/{len(preview)}")
+    print(f"     có category/product: {filled}/{len(samples)}")
 
 
 if __name__ == "__main__":

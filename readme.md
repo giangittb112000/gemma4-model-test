@@ -4,6 +4,8 @@
 - **Serve:** base + LoRA adapter (không merge)
 - **Test:** chỉ `query-parser-ft`
 
+Giải thích chỉ số (`r`, latency, vLLM…): [`docs/chi-so-du-an.md`](docs/chi-so-du-an.md)
+
 ## Checklist đẩy server
 
 ```bash
@@ -53,21 +55,37 @@ Sau `make down && make up`, log thêm: queue/prefill/decode/cached_tokens/`PERF 
 
 ## Data train
 
-`finetune/data/train.json` — format TRL `messages` (`role`/`content`). Gemma: `role=model`.
+Schema response:
 
-Sinh từ 200 keyword đầu `data/search_report.csv` + `data/synony.json`:
+```json
+{"category": string|null, "product": string|null, "spec": string[]}
+```
+
+- Seed (agent làm giàu, **gitignored**): `finetune/data/finetune/*.json`
+- Train file (commit cái này): `finetune/data/train.json` — TRL `messages` (`role=model` cho Gemma)
+
+Local (có seeds): `make data` → commit/push `train.json`. Server: chỉ `make train` (không gom data).
 
 ```bash
-python3 finetune/build_train_data.py --limit 200
-# review nhanh: finetune/data/train_preview.jsonl  (query + output)
+# local
+make data
+
+# server
 make train
+make up && make ready
+make test Q="ip17 256"
 ```
 
 ## Cấu trúc
 
 ```text
 compose.yaml / compose.train.yaml
-finetune/   # QLoRA, prompt.py, data/train.json
+finetune/
+  prompt.py
+  build_train_from_seeds.py
+  train_qlora.py
+  data/finetune/*.json   # seeds
+  data/train.json
 models/adapters/
 scripts/vllm-serve.sh
 test_vllm.py

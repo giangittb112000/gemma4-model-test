@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 models/adapters/*
 !models/adapters/.gitkeep
-finetune/data/train_preview.jsonl
+# Seed thô (agent làm giàu) — nặng/nhiều file; local `make data` rồi commit train.json
+finetune/data/finetune/

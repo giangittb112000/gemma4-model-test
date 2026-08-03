@@ -34,23 +34,24 @@ SCHEMA = {
     "properties": {
         "category": {"type": ["string", "null"]},
         "product": {"type": ["string", "null"]},
-        "brand": {"type": ["string", "null"]},
-        "model": {"type": ["string", "null"]},
-        "attributes": {"type": "object"},
+        "spec": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
     },
-    "required": ["category", "product", "brand", "model", "attributes"],
+    "required": ["category", "product", "spec"],
     "additionalProperties": False,
 }
 
 DEFAULT_QUERIES = [
-    "dt ip 256",
-    "ip 16 promax",
-    "ss s25ultra 512",
-    "điện thoại pin khủng",
-    "điện thoại cho sinh viên",
-    "dt pin trâu dưới 10 triệu",
-    "laptop mỏng nhẹ cho sinh viên",
-    "tai nghe bluetooth",
+    "ip17 256",
+    "iphone 17",
+    "redmi 9",
+    "dt",
+    "reno11 pro",
+    "spark 20c 128gb",
+    "poco m2",
+    "điện thoại poco m2",
 ]
 
 LINE = "─" * 64
