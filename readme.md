@@ -12,7 +12,7 @@ Giải thích chỉ số (`r`, latency, vLLM…): [`docs/chi-so-du-an.md`](docs/
 cp .env.example .env          # HF_TOKEN=...
 # lần đầu: HF_HUB_OFFLINE=0 ; cache đủ rồi có thể =1
 
-make train                    # cần GPU trống
+make train                    # cần GPU trống; default nhanh: 1 epoch, batch=2
 make up && make ready         # wait + warmup (bỏ cold start)
 make test Q="iphoooen 17 256" # xem model_ms < 2000
 ```

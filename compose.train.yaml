@@ -2,6 +2,9 @@
 # Tắt vLLM trước (cùng GPU): docker compose stop
 #
 #   docker compose -f compose.train.yaml run --rm train
+# Default nhanh (test): epochs=1 batch=2 accum=4 max_seq=256
+# Chậm hơn / chất lượng: ... run --rm train python train_qlora.py --epochs 3
+# Smoke cực nhanh:     ... run --rm train python train_qlora.py --max-steps 200
 
 services:
   train:

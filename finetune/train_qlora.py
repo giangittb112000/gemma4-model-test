@@ -84,14 +84,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/models/adapters/query-parser-ft"),
     )
-    # Khớp serve max_model_len=512 (prompt ngắn).
-    p.add_argument("--max-seq-length", type=int, default=512)
-    p.add_argument("--epochs", type=float, default=3.0)
+    # Prompt JSON ngắn (~150–200 tok) — 256 đủ, tiết kiệm VRAM → batch lớn hơn.
+    p.add_argument("--max-seq-length", type=int, default=256)
+    # Ưu tiên vòng test nhanh: 1 epoch. Full quality có thể --epochs 2|3.
+    p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--batch-size", type=int, default=1)
-    p.add_argument("--grad-accum", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=2)
+    p.add_argument("--grad-accum", type=int, default=4)
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=-1,
+        help="Giới hạn step (smoke test). -1 = theo epochs.",
+    )
     return p.parse_args()
 
 
@@ -286,19 +293,26 @@ def main() -> None:
     print(json.dumps(sample0, ensure_ascii=False, indent=2))
 
     use_bf16 = torch.cuda.is_bf16_supported()
+    # ~9725 mẫu / batch2 ≈ 4863 micro-step/epoch — nhanh hơn ~2× so với batch=1;
+    # epochs=1 → ~1/3 thời gian so với epochs=3.
+    print(
+        f"[train] epochs={args.epochs} batch={args.batch_size} "
+        f"accum={args.grad_accum} max_seq={args.max_seq_length} "
+        f"max_steps={args.max_steps}"
+    )
     sft_kwargs = dict(
         output_dir=str(args.adapter_dir),
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        logging_steps=1,
-        save_strategy="epoch",
+        logging_steps=50,
+        save_strategy="no",
         eval_strategy="no",
         bf16=use_bf16,
         fp16=not use_bf16,
         optim="paged_adamw_8bit",
-        warmup_ratio=0.05,
+        warmup_ratio=0.03,
         lr_scheduler_type="cosine",
         report_to="none",
         seed=42,
@@ -306,7 +320,9 @@ def main() -> None:
         gradient_checkpointing_kwargs={"use_reentrant": False},
         # Gemma 4 multimodal: giữ cột phụ nếu collator/model cần.
         remove_unused_columns=False,
-        save_total_limit=1,
+        dataloader_num_workers=2,
+        dataloader_pin_memory=True,
+        max_steps=args.max_steps,
     )
     try:
         sft_args = SFTConfig(**sft_kwargs, max_length=args.max_seq_length)

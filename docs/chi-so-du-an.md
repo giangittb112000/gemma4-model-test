@@ -47,10 +47,11 @@ Liên quan: `lora_alpha` thường ~ `2 × r` (ở đây alpha=32 khi r=16) — 
 | **`lora-alpha`** | Độ “mạnh” khi áp LoRA (thường ~2×r). |
 | **`lora_dropout`** | Bỏ ngẫu nhiên một phần kết nối lúc train → giảm overfitting. |
 | **`target_modules`** | Layer nào được gắn LoRA (vd. `q_proj`, `v_proj`… trong `language_model`). |
-| **`max_seq_length`** | Độ dài tối đa 1 mẫu train (token). Dài hơn = tốn VRAM train hơn. |
-| **`epochs`** | Số vòng duyệt hết tập train. Nhiều quá với data nhỏ → dễ nhớ máy. |
-| **`batch_size`** | Số mẫu xử lý song song trên GPU mỗi bước. |
-| **`grad_accum`** | Gom gradient nhiều bước nhỏ = “batch lớn giả”. |
+| **`max_seq_length`** | Độ dài tối đa 1 mẫu train (token). Default **256** (JSON ngắn). |
+| **`epochs`** | Số vòng train. Default **1** (nhanh để test); tăng 2–3 khi cần chất lượng. |
+| **`batch_size`** | Mẫu/GPU mỗi micro-step. Default **2** (nhanh hơn batch=1). |
+| **`grad_accum`** | Gom gradient. Default **4** (effective batch = 8). |
+| **`max_steps`** | Cắt sớm để smoke test (`-1` = chạy đủ epochs). |
 | **`lr` (learning rate)** | Bước học mỗi lần cập nhật. Cao = học nhanh nhưng dễ loạn; thấp = ổn nhưng chậm. |
 | **`optim` (paged_adamw_8bit)** | Bộ tối ưu tiết kiệm VRAM lúc train. |
 | **4-bit / NF4 / double quant** | Nén base lúc train để vừa GPU 16GB. |
